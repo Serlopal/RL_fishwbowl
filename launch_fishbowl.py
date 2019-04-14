@@ -29,6 +29,7 @@ class NPC():
 		self.color = Qt.black
 		self.coords = np.array([0, 0])
 		self.v = np.array([0, 0])
+		self.pvdi = np.array([0, 0])
 		self.first = True
 		self.dead = False
 
@@ -36,9 +37,21 @@ class NPC():
 		if not self.dead:
 			self.coords = self.coords + self.v
 			if not self.inside_sphere(self.coords) or self.first:
+				if not self.first:
+					forbidden_dirs = [self.pvdi - 1 if self.pvdi != 0 else len(self.allowed_dirs) - 1,
+									  self.pvdi,
+									  self.pvdi + 1 if self.pvdi != len(self.allowed_dirs) - 1 else 0]
+					available_dirs = np.delete(self.allowed_dirs, forbidden_dirs, axis=0)
+					chosen_dir = np.random.randint(low=0, high=len(available_dirs))
+					self.dir = available_dirs[chosen_dir, :]
+					self.pvdi = np.where(np.all(self.allowed_dirs == self.dir, axis=1))[0][0]
+					print(self.pvdi)
+				else:
+					chosen_dir = np.random.randint(low=0, high=len(self.allowed_dirs))
+					self.dir = self.allowed_dirs[chosen_dir, :]
+					self.pvdi = chosen_dir
 				self.first = False
-				self.v = np.random.randint(low=-100, high=100, size=2) * 0.00002
-
+				self.v = self.dir * np.random.randint(low=40, high=100, size=2) * 0.00002
 				self.coords = self.spherical_clip(self.coords)
 
 	def killed_by(self, player):
@@ -56,16 +69,16 @@ class NPC():
 		self.first = True
 		self.dead = False
 
-	@staticmethod
-	def spherical_clip(p, r=0.47):
+	def spherical_clip(self, p, r=0.499):
+		r -= self.d/2
 		p = np.array(p)
 		dist = np.sqrt(np.sum(p ** 2))
 		if dist > r:
 			p = p * (r / dist)
 		return p
 
-	@staticmethod
-	def inside_sphere(p, r=0.46):
+	def inside_sphere(self, p, r=0.50):
+		r -= self.d/2
 		dist = np.sqrt(np.sum(np.array(p) ** 2))
 		if dist > r:
 			return False
@@ -85,6 +98,9 @@ class Player(NPC):
 		super().__init__(diameter, fishbowl_diameter)
 		self.original_color = Qt.blue
 		self.color = Qt.blue
+
+	def move(self):
+		self.coords = self.coords + np.random.randint(low=-100, high=100, size=2) * 0.00002
 
 
 class Fishbowl(QWidget):

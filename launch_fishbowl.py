@@ -26,13 +26,14 @@ class DynamicLabel(QLabel):
 
 
 class NPC():
-	allowed_dirs = np.array([[0, 1], [1, 1], [1, 0], [1, -1], [0, -1], [-1, -1], [-1, 0], [-1, 1]])
+	allowed_dirs = np.array([np.array(x) for x in [[0, 1], [1, 1], [1, 0], [1, -1], [0, -1], [-1, -1], [-1, 0], [-1, 1]]])
 
 	def __init__(self, diameter, fishbowl_diameter):
+		self.original_coords = np.array([0, 0])
 		self.d = diameter / fishbowl_diameter
 		self.original_color = Qt.black
 		self.color = Qt.black
-		self.coords = np.array([0, 0])
+		self.coords = self.original_coords
 		self.v = np.array([0, 0])
 		self.pvdi = np.array([0, 0])
 		self.first = True
@@ -72,7 +73,7 @@ class NPC():
 
 	def revive(self):
 		self.color = self.original_color
-		self.coords = np.array([0, 0])
+		self.coords = self.original_coords
 		self.v = np.array([0, 0])
 		self.first = True
 		self.dead = False
@@ -95,25 +96,31 @@ class NPC():
 
 
 class Enemy(NPC):
+
 	def __init__(self, diameter, fishbowl_diameter):
 		super().__init__(diameter, fishbowl_diameter)
 		self.original_color = Qt.red
 		self.color = Qt.red
+		self.original_coords = np.array([0, 1])
+		self.coords = self.original_coords
 
 
 class Player(NPC):
 	"""
 	https://keon.io/deep-q-learning/
 	"""
+
 	def __init__(self, diameter, fishbowl_diameter, state_size):
 		super().__init__(diameter, fishbowl_diameter)
+		self.original_coords = np.array([0, -1])
 		self.original_color = Qt.blue
 		self.color = Qt.blue
+		self.coords = self.original_coords
 
 		# ----------------------------
 		self.state_size = state_size
-		self.action_size = 2 # we move in a 2D world
-		self.memory = deque(maxlen=2000)
+		self.action_size = 8
+		self.memory = deque(maxlen=20000)
 		self.gamma = 0.95  # discount rate
 		self.epsilon = 1.0  # exploration rate
 		self.epsilon_min = 0.01
@@ -121,14 +128,21 @@ class Player(NPC):
 		self.learning_rate = 0.001
 		self.model = self._build_model()
 
-	def move(self, enemies_coords): # TODO apparently PEP8 does not let you change the args in an inhereted method...
+	def move(self, enemies): # TODO apparently PEP8 does not let you change the args in an inhereted method...
+		"""
+		:param enemies: all enemy instances to be considered as inputs to determine where the layer shall move 
+		"""
+
+		enemies_coords = [x.coords if not x.dead else [0, 0] for x in enemies]
+
 		# build current state
 		state = np.concatenate([enemies_coords, np.reshape(self.coords, (1, -1))], axis=0)
 		state = np.reshape(state, (1, -1))
 		# choose an action
-		action = np.squeeze(self.model.predict(state))
+		action = self.allowed_dirs[np.argmax(np.squeeze(self.model.predict(state)))]
+
 		# update player coords
-		self.coords = self.coords + (action - 1) * 0.002
+		self.coords = self.coords + action * 0.002
 		if not self.inside_sphere(self.coords):
 			self.coords = self.spherical_clip(self.coords)
 		# compute reward
@@ -144,7 +158,7 @@ class Player(NPC):
 		model = Sequential()
 		model.add(Dense(24, input_dim=self.state_size, activation='relu'))
 		model.add(Dense(24, activation='relu'))
-		model.add(Dense(self.action_size, activation='sigmoid'))
+		model.add(Dense(self.action_size, activation='softmax'))
 		model.compile(loss='mse',
 					  optimizer=Adam(lr=self.learning_rate))
 		return model
@@ -171,6 +185,10 @@ class Player(NPC):
 		if self.epsilon > self.epsilon_min:
 			self.epsilon *= self.epsilon_decay
 
+	def revive(self):
+		super().revive()
+		self.memory.clear()
+
 
 class Fishbowl(QWidget):
 	animation_emitter = pyqtSignal(object)
@@ -178,17 +196,15 @@ class Fishbowl(QWidget):
 	def __init__(self, n_games_signal):
 		super().__init__()
 
-		self.render_bowl = True
-
 		# connect signal from emitter to trigger the animation
-		self.animation_emitter.connect(lambda x: self._move_npcs(x))
+		self.animation_emitter.connect(lambda x: self.life_loop(x))
 
 		self.fishbowl_color = Qt.black
 
 		self.fishbowl_size = 350
 		self.wheel_size = self.fishbowl_size * 1.15
 		self.wheel_width = self.fishbowl_size * 0.15
-		self.npc_size = self.fishbowl_size * 0.3
+		self.npc_size = self.fishbowl_size * 0.2
 		self.fishbowl_border_size = self.fishbowl_size * 0.004
 		self.fishbowl_thin_border_size = self.fishbowl_size * 0.002
 
@@ -196,9 +212,6 @@ class Fishbowl(QWidget):
 		self.enemies = [Enemy(self.npc_size, self.fishbowl_size) for _ in range(self.nenemies)]
 		self.player = Player(self.npc_size, self.fishbowl_size, (self.nenemies + 1) * 2)
 
-		self.start_flag = True
-		self.start_time = None
-		self.time_advantage = 2
 		self.n_games = 0
 		self.n_games_signal = n_games_signal
 
@@ -207,32 +220,32 @@ class Fishbowl(QWidget):
 		new_max = self.fishbowl_size
 		return ((p / original_max) * new_max for p in point)
 
-	def _move_npcs(self, command):
-		# start moving enemies but not player yet
-		if self.start_flag:
-			self.start_flag = False
-			self.start_time = time.time()
-		go_player = time.time() - self.start_time > self.time_advantage
+	def life_loop(self, command):
+		"""
+		:param command: unused
+		this method imlements the main loop of the fishbowl
+		in which we move around players, check who is dead and so on
+		"""
 
 		# check someone is still alive
 		alive_enemies = [x for x in self.enemies if not x.dead]
 		if not alive_enemies:
 			if len(self.player.memory) > 32:
-				self.player.replay(32)
+				for _ in range(100):
+					self.player.replay(32)
 			self.restart_game()
 			return
 
 		for enemy in alive_enemies:
 			enemy.move()
 			# check dead
-			if go_player:
-				enemy.check_killed_by(self.player)
-		if go_player:
-			pass
-			self.player.move([x.coords if not x.dead else [-1, -1] for x in self.enemies])
+			enemy.check_killed_by(self.player)
 
-		if self.render_bowl:
-			self.repaint()
+		self.player.move(self.enemies)
+
+		print(len(self.player.memory))
+
+		self.repaint()
 
 	def paintEvent(self, e):
 		qp = QPainter()

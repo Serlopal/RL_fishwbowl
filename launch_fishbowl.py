@@ -7,7 +7,7 @@ import numpy as np
 import threading
 from collections import deque
 from keras import Sequential
-from keras.layers import Dense
+from keras.layers import Dense, Conv2D, Flatten
 from keras.optimizers import Adam
 import random
 
@@ -17,20 +17,21 @@ class DynamicLabel(QLabel):
 
 	def __init__(self, base_text):
 		super().__init__()
-		self.font = QFont("Times", 30, QFont.Bold)
+		self.font = QFont("Times", 12, QFont.Bold)
 		self.setFont(self.font)
 
 		self.base_text = base_text
 		self.setText(self.base_text + "0")
-		self.signal.connect(lambda x: self.setText(self.base_text + x))
+		self.signal.connect(lambda x: self.setText(x))
 
 
 class NPC():
 	allowed_dirs = np.array([np.array(x) for x in [[0, 1], [1, 1], [1, 0], [1, -1], [0, -1], [-1, -1], [-1, 0], [-1, 1]]])
 
-	def __init__(self, diameter, fishbowl_diameter):
+	def __init__(self, pixel_radius, fishbowl_pixel_radius, fishbowl_radius):
 		self.original_coords = np.array([0, 0])
-		self.d = diameter / fishbowl_diameter
+		self.r = pixel_radius / fishbowl_pixel_radius
+		self.fishbowl_radius = fishbowl_radius
 		self.original_color = Qt.black
 		self.color = Qt.black
 		self.coords = self.original_coords
@@ -40,32 +41,23 @@ class NPC():
 		self.dead = False
 
 	def move(self):
-		if not self.dead:
-			self.coords = self.coords + self.v
-			if not self.inside_sphere(self.coords) or self.first:
-				if not self.first:
-					forbidden_dirs = [self.pvdi - 1 if self.pvdi != 0 else len(self.allowed_dirs) - 1,
-									  self.pvdi,
-									  self.pvdi + 1 if self.pvdi != len(self.allowed_dirs) - 1 else 0]
-					available_dirs = np.delete(self.allowed_dirs, forbidden_dirs, axis=0)
-					chosen_dir = np.random.randint(low=0, high=len(available_dirs))
-					self.dir = available_dirs[chosen_dir, :]
-					self.pvdi = np.where(np.all(self.allowed_dirs == self.dir, axis=1))[0][0]
-				else:
-					chosen_dir = np.random.randint(low=0, high=len(self.allowed_dirs))
-					self.dir = self.allowed_dirs[chosen_dir, :]
-					self.pvdi = chosen_dir
-				self.first = False
-				self.v = self.dir * np.random.randint(low=40, high=100, size=2) * 0.00002
-				self.coords = self.spherical_clip(self.coords)
-
-	def check_killed_by(self, player):
-		p = player.coords
-		e = self.coords
-		dist = self.dist(e, p)
-		if dist < self.d:
-			self.dead = True
-			self.color = Qt.gray
+		self.coords = self.coords + self.v
+		if not self.inside_sphere() or self.first:
+			if not self.first:
+				forbidden_dirs = [self.pvdi - 1 if self.pvdi != 0 else len(self.allowed_dirs) - 1,
+								  self.pvdi,
+								  self.pvdi + 1 if self.pvdi != len(self.allowed_dirs) - 1 else 0]
+				available_dirs = np.delete(self.allowed_dirs, forbidden_dirs, axis=0)
+				chosen_dir = np.random.randint(low=0, high=len(available_dirs))
+				self.dir = available_dirs[chosen_dir, :]
+				self.pvdi = np.where(np.all(self.allowed_dirs == self.dir, axis=1))[0][0]
+			else:
+				chosen_dir = np.random.randint(low=0, high=len(self.allowed_dirs))
+				self.dir = self.allowed_dirs[chosen_dir, :]
+				self.pvdi = chosen_dir
+			self.first = False
+			self.v = self.dir * np.random.randint(low=40, high=100, size=2) * 0.00002
+			self.spherical_clip()
 
 	@staticmethod
 	def dist(a, b):
@@ -78,18 +70,14 @@ class NPC():
 		self.first = True
 		self.dead = False
 
-	def spherical_clip(self, p, r=0.499):
-		r -= self.d/2
-		p = np.array(p)
-		dist = np.sqrt(np.sum(p ** 2))
-		if dist > r:
-			p = p * (r / dist)
-		return p
+	def spherical_clip(self):
+		dist = np.sqrt(np.sum(self.coords ** 2))
+		if dist > self.fishbowl_radius - self.r:
+			self.coords = self.coords * ((self.fishbowl_radius - self.r) / dist)
 
-	def inside_sphere(self, p, r=0.50):
-		r -= self.d/2
-		dist = np.sqrt(np.sum(np.array(p) ** 2))
-		if dist > r:
+	def inside_sphere(self):
+		dist = np.sqrt(np.sum(self.coords ** 2))
+		if dist > (self.fishbowl_radius - self.r):
 			return False
 		else:
 			return True
@@ -97,11 +85,11 @@ class NPC():
 
 class Enemy(NPC):
 
-	def __init__(self, diameter, fishbowl_diameter):
-		super().__init__(diameter, fishbowl_diameter)
+	def __init__(self, pixel_radius, fishbowl_pixel_radius, fishbowl_radius):
+		super().__init__(pixel_radius, fishbowl_pixel_radius, fishbowl_radius)
 		self.original_color = Qt.red
 		self.color = Qt.red
-		self.original_coords = np.array([0, 1])
+		self.original_coords = np.array([0, 1.0])
 		self.coords = self.original_coords
 
 
@@ -110,25 +98,29 @@ class Player(NPC):
 	https://keon.io/deep-q-learning/
 	"""
 
-	def __init__(self, diameter, fishbowl_diameter, state_size):
-		super().__init__(diameter, fishbowl_diameter)
-		self.original_coords = np.array([0, -1])
+	def __init__(self, pixel_radius, fishbowl_pixel_radius, fishbowl_radius, state_size):
+		super().__init__(pixel_radius, fishbowl_pixel_radius, fishbowl_radius)
+		self.original_coords = np.array([0, -1.0])
 		self.original_color = Qt.blue
 		self.color = Qt.blue
 		self.coords = self.original_coords
+		self.step = 0.1
+		self.grid_size = int(1 / self.step)
 
 		# ----------------------------
 		self.state_size = state_size
 		self.action_size = 8
 		self.memory = deque(maxlen=20000)
 		self.gamma = 0.95  # discount rate
-		self.epsilon = 1.0  # exploration rate
+		self.epsilon = 0.5  # 1.0  # exploration rate
 		self.epsilon_min = 0.01
 		self.epsilon_decay = 0.995
 		self.learning_rate = 0.001
 		self.model = self._build_model()
 
-	def move(self, enemies): # TODO apparently PEP8 does not let you change the args in an inhereted method...
+		self.dist_history = []
+
+	def _move(self, enemies):  # TODO apparently PEP8 does not let you change the args in an inhereted method...
 		"""
 		:param enemies: all enemy instances to be considered as inputs to determine where the layer shall move 
 		"""
@@ -136,27 +128,44 @@ class Player(NPC):
 		enemies_coords = [x.coords if not x.dead else [0, 0] for x in enemies]
 
 		# build current state
-		state = np.concatenate([enemies_coords, np.reshape(self.coords, (1, -1))], axis=0)
-		state = np.reshape(state, (1, -1))
+		state = self._build_state(enemies)
 		# choose an action
-		action = self.allowed_dirs[np.argmax(np.squeeze(self.model.predict(state)))]
-
+		action = self.allowed_dirs[self.act(state)]
 		# update player coords
 		self.coords = self.coords + action * 0.002
-		if not self.inside_sphere(self.coords):
-			self.coords = self.spherical_clip(self.coords)
+		if not self.inside_sphere():
+			self.spherical_clip()
 		# compute reward
-		reward = 1 / np.min([self.dist(self.coords, x) for x in enemies_coords])
-		# print(reward)
+		reward = np.min([self.dist(self.coords, x.coords) for x in enemies])
+		print(reward)
 		# build next state
-		next_state = np.reshape(np.concatenate([enemies_coords, np.reshape(self.coords, (1, -1))], axis=0), (1, -1))
+		next_state = self._build_state(enemies)
 		# store state to memory
 		self.remember(state, action, reward, next_state, False)
+
+	def _build_state(self, enemies):
+		enemies_grid_coords = [self._coords2grid(x.coords) for x in enemies]
+		grid = np.zeros((self.grid_size*2, self.grid_size*2))
+		for coords in enemies_grid_coords:
+			grid[coords[0], coords[1]] += 1
+		player_coords = self._coords2grid(self.coords)
+		grid[player_coords[0], player_coords[1]] = -1.0
+
+		return np.expand_dims(np.expand_dims(grid, axis=2), axis=0)
+
+	def _coords2grid(self, coords):
+		coords = (coords * (self.grid_size-1)).astype(int)
+		coords[1] = -coords[1]
+		coords += self.grid_size
+		coords = coords[::-1]
+		return coords
 
 	def _build_model(self):
 		# Neural Net for Deep-Q learning Model
 		model = Sequential()
-		model.add(Dense(24, input_dim=self.state_size, activation='relu'))
+		model.add(Conv2D(64, kernel_size=3, activation='relu', input_shape=(self.grid_size*2, self.grid_size*2, 1)))
+		model.add(Conv2D(32, kernel_size=3, activation='relu'))
+		model.add(Flatten())
 		model.add(Dense(24, activation='relu'))
 		model.add(Dense(self.action_size, activation='softmax'))
 		model.compile(loss='mse',
@@ -189,36 +198,47 @@ class Player(NPC):
 		super().revive()
 		self.memory.clear()
 
+	def check_killed(self, enemies):
+		for enemy in enemies:
+			e = enemy.coords
+			p = self.coords
+			dist = self.dist(e, p)
+			if dist < 2*self.r:  # two balls touching, 2 radius
+				self.dead = True
+				self.color = Qt.gray
+				return True
+
 
 class Fishbowl(QWidget):
 	animation_emitter = pyqtSignal(object)
 
-	def __init__(self, n_games_signal):
+	def __init__(self, info_signal):
 		super().__init__()
 
 		# connect signal from emitter to trigger the animation
 		self.animation_emitter.connect(lambda x: self.life_loop(x))
 
 		self.fishbowl_color = Qt.black
-
-		self.fishbowl_size = 350
-		self.wheel_size = self.fishbowl_size * 1.15
-		self.wheel_width = self.fishbowl_size * 0.15
-		self.npc_size = self.fishbowl_size * 0.2
-		self.fishbowl_border_size = self.fishbowl_size * 0.004
-		self.fishbowl_thin_border_size = self.fishbowl_size * 0.002
+		self.fishbowl_radius = 1.0
+		self.fishbowl_pixel_radius = 100
+		self.wheel_size = self.fishbowl_pixel_radius * 1.15
+		self.wheel_width = self.fishbowl_pixel_radius * 0.15
+		self.npc_pixel_radius = self.fishbowl_pixel_radius * 0.1
+		self.fishbowl_border_size = self.fishbowl_pixel_radius * 0.004
+		self.fishbowl_thin_border_size = self.fishbowl_pixel_radius * 0.002
 
 		self.nenemies = 10
-		self.enemies = [Enemy(self.npc_size, self.fishbowl_size) for _ in range(self.nenemies)]
-		self.player = Player(self.npc_size, self.fishbowl_size, (self.nenemies + 1) * 2)
+		self.enemies = [Enemy(
+			self.npc_pixel_radius, self.fishbowl_pixel_radius, self.fishbowl_radius) for _ in range(self.nenemies)]
+		self.player = Player(
+			self.npc_pixel_radius, self.fishbowl_pixel_radius, self.fishbowl_radius, (self.nenemies + 1) * 2)
 
 		self.n_games = 0
-		self.n_games_signal = n_games_signal
+		self.info_signal = info_signal
 
 	def scale_point(self, point):
-		original_max = 0.5
-		new_max = self.fishbowl_size
-		return ((p / original_max) * new_max for p in point)
+		new_max = self.fishbowl_pixel_radius
+		return ((p / self.fishbowl_radius) * new_max for p in point)
 
 	def life_loop(self, command):
 		"""
@@ -226,24 +246,18 @@ class Fishbowl(QWidget):
 		this method imlements the main loop of the fishbowl
 		in which we move around players, check who is dead and so on
 		"""
-
-		# check someone is still alive
-		alive_enemies = [x for x in self.enemies if not x.dead]
-		if not alive_enemies:
+		if self.player.check_killed(self.enemies):
 			if len(self.player.memory) > 32:
-				for _ in range(100):
+				for i in range(10):
+					self.info_signal.emit("Training batch {}".format(i))
 					self.player.replay(32)
 			self.restart_game()
 			return
 
-		for enemy in alive_enemies:
+		self.player._move(self.enemies)
+
+		for enemy in self.enemies:
 			enemy.move()
-			# check dead
-			enemy.check_killed_by(self.player)
-
-		self.player.move(self.enemies)
-
-		print(len(self.player.memory))
 
 		self.repaint()
 
@@ -262,12 +276,12 @@ class Fishbowl(QWidget):
 		qp.setPen(QPen(self.fishbowl_color, self.fishbowl_border_size, Qt.SolidLine))
 		# draw fishbowl
 		qp.setBrush(QBrush(Qt.gray, Qt.SolidPattern))
-		qp.drawEllipse(c, *([self.fishbowl_size] * 2))
+		qp.drawEllipse(c, *([self.fishbowl_pixel_radius] * 2))
 
 		# draw axis lines
 		qp.setPen(QPen(self.fishbowl_color, self.fishbowl_thin_border_size, Qt.DashDotDotLine))
 		for angle in range(0, 420, 45):
-			line = QLineF(); line.setP1(c); line.setAngle(angle); line.setLength(self.fishbowl_size)
+			line = QLineF(); line.setP1(c); line.setAngle(angle); line.setLength(self.fishbowl_pixel_radius)
 			qp.drawLine(line)
 		# draw wheel separators
 		line = QLineF(); line.setP1(c + QPoint(self.wheel_size, 0)); line.setAngle(0); line.setLength(self.wheel_width)
@@ -281,18 +295,14 @@ class Fishbowl(QWidget):
 
 		qp.setPen(QPen(self.fishbowl_color, self.fishbowl_border_size, Qt.SolidLine))
 
-		# draw dead enemies
-		for i, enemy in enumerate([x for x in self.enemies if x.dead]):
+		# draw enemies
+		for i, enemy in enumerate(self.enemies):
 			qp.setBrush(QBrush(enemy.color, Qt.SolidPattern))
-			qp.drawEllipse(c + QPoint(*self.scale_point(enemy.coords)), *([self.npc_size] * 2))
-		# draw alive enemies
-		for i, enemy in enumerate([x for x in self.enemies if not x.dead]):
-			qp.setBrush(QBrush(enemy.color, Qt.SolidPattern))
-			qp.drawEllipse(c + QPoint(*self.scale_point(enemy.coords)), *([self.npc_size] * 2))
+			qp.drawEllipse(c + QPoint(*self.scale_point(enemy.coords)), *([self.npc_pixel_radius] * 2))
 
 		# draw player
 		qp.setBrush(QBrush(self.player.color, Qt.SolidPattern))
-		qp.drawEllipse(c + QPoint(*self.scale_point(self.player.coords)), *([self.npc_size] * 2))
+		qp.drawEllipse(c + QPoint(*self.scale_point(self.player.coords)), *([self.npc_pixel_radius] * 2))
 
 	def animate_balls(self):
 		self.update_thread = threading.Thread(target=self._animate_balls)
@@ -306,7 +316,7 @@ class Fishbowl(QWidget):
 
 	def restart_game(self):
 		self.n_games += 1
-		self.n_games_signal.emit(str(self.n_games))
+		self.info_signal.emit("Game {0} - Exploration Rate {1}".format(self.n_games, self.player.epsilon))
 		self.start_flag = True
 		for enemy in self.enemies:
 			enemy.revive()
@@ -335,7 +345,7 @@ class gameUI:
 
 		self.layout = QGridLayout()
 		self.n_games_label = DynamicLabel("Game ")
-		self.layout.addWidget(self.n_games_label, 0,0,1,10)
+		self.layout.addWidget(self.n_games_label, 0, 0, 1, 10)
 		self.fishbowl = Fishbowl(self.n_games_label.signal)
 		self.layout.addWidget(self.fishbowl, 1, 0, 10, 10)
 

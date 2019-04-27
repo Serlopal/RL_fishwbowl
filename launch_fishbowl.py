@@ -106,6 +106,7 @@ class NPC():
 	def revive(self):
 		self.color = self.original_color
 		self.coords = (np.array([np.random.rand(), np.random.rand()]) * 2) - 1
+		self.spherical_clip()
 		self.v = np.array([0, 0])
 		self.first = True
 		self.dead = False
@@ -130,6 +131,7 @@ class Enemy(NPC):
 		self.original_color = Qt.white
 		self.color = self.original_color
 		self.original_coords = np.array([np.random.rand(), np.random.rand()])
+		self.spherical_clip()
 		self.coords = self.original_coords
 
 
@@ -143,6 +145,7 @@ class Player(NPC):
 		self.allowed_dirs = np.vstack([self.allowed_dirs, np.reshape([0, 0], (1, 2))])
 
 		self.original_coords = (np.array([np.random.rand(), np.random.rand()]) * 2) - 1
+		self.spherical_clip()
 		self.original_color = Qt.black
 		self.color = self.original_color
 		self.coords = self.original_coords
@@ -158,7 +161,7 @@ class Player(NPC):
 		self.epsilon_decay = 0.995
 		self.curr_state = None
 		self.curr_action = None
-		self.speed = 0.001
+		self.speed = 0.01
 		# self.learning_rate = 0.001
 		self.wlen = 4
 		self.frame_memory = deque(maxlen=self.wlen)
@@ -184,18 +187,15 @@ class Player(NPC):
 		self.curr_state = state
 		self.curr_action = action
 
-	def knowledge2memory(self, enemies):
+	def knowledge2memory(self, terminal_flag, enemies):
 		# build next state
 		next_state = self._build_state()
 		# compute reward and check if state is terminal
-		terminal_flag = self.check_killed(enemies=enemies)
-		# reward = min([self.dist(self.coords, x.coords) for x in enemies]) if not terminal_flag else 0.0
-		reward = 1.0 if not terminal_flag else 0.0
+		reward = min([self.dist(self.coords, x.coords) for x in enemies]) if not terminal_flag else 0.0
+		# reward = 1.0 if not terminal_flag else -10.0
 
 		# store state to memory
 		self.remember(self.curr_state, self.curr_action, reward, next_state, terminal_flag)
-
-		return terminal_flag
 
 	def _build_state(self):
 		# now build cube
@@ -217,14 +217,12 @@ class Player(NPC):
 		else:
 			# Neural Net for Deep-Q learning Model
 			model = Sequential()
-			model.add(Conv2D(128, kernel_size=11, activation='relu'))
 			model.add(Conv2D(64, kernel_size=5, activation='relu'))
 			model.add(Conv2D(32, kernel_size=3, activation='relu'))
-			model.add(MaxPool2D(pool_size=(2, 2)))
 			model.add(Flatten())
-			model.add(Dense(64, activation='relu'))
+			model.add(Dense(32, activation='relu'))
 			model.add(Dropout(0.1))
-			model.add(Dense(self.action_size, activation='relu'))
+			model.add(Dense(self.action_size, activation='linear'))
 			model.compile(loss='mse', optimizer=Adam())
 			return model
 
@@ -273,7 +271,10 @@ class Player(NPC):
 	def save_frame(self, frame):
 		frame = frame[int(0.15*frame.shape[0]):-int(0.15*frame.shape[0]), int(0.25*frame.shape[1]):-int(0.25*frame.shape[1])]
 		frame = resize(frame, (self.frame_size, self.frame_size), interpolation=INTER_CUBIC)
-		self.frame_memory.append(frame)
+		while True:
+			self.frame_memory.append(frame)
+			if len(self.frame_memory) >= self.wlen:
+				break
 
 
 class Fishbowl(QWidget):
@@ -293,8 +294,6 @@ class Fishbowl(QWidget):
 		self.npc_pixel_radius = self.fishbowl_pixel_radius * 0.1
 		self.fishbowl_border_size = self.fishbowl_pixel_radius * 0.004
 		self.fishbowl_thin_border_size = self.fishbowl_pixel_radius * 0.002
-
-		self.life_loop_counter = 0
 
 		self.nenemies = 3
 		self.enemies = [Enemy(
@@ -322,33 +321,37 @@ class Fishbowl(QWidget):
 		in which we move around players, check who is dead and so on
 		"""
 
-		if self.life_loop_counter >= self.player.wlen:
+		if command == "act":
+			# current state
+			self.player.save_frame(self.get_frame())
+
 			# issue player action
 			self.player.act()
-			# observe environment reaction
+			# issue environment reaction
 			for enemy in self.enemies:
 				enemy.move()
 
 			# update state
 			self.repaint()
-			time.sleep(0.1)
+		elif command == "learn":
+			# observe next state
 			self.player.save_frame(self.get_frame())
 
 			# store action knowledge and check if the state is terminal
-			terminal_flag = self.player.knowledge2memory(self.enemies)
+			terminal_flag = self.player.check_killed(enemies=self.enemies)
+
+			self.player.knowledge2memory(terminal_flag, self.enemies)
 
 			if terminal_flag:
-				if len(self.player.memory) > 32:
-					self.player.replay(batch_size=32, num_batches=int(len(self.player.memory) / 32))
-					if self.n_games % 30 == 0:
-						self.player.save_model()
+				self.train_on_memory()
 				self.restart_game()
 				return
-		else:
-			# update state
-			self.repaint()
-			self.player.save_frame(self.get_frame())
-		self.life_loop_counter += 1
+
+	def train_on_memory(self):
+		if len(self.player.memory) > 32:
+			self.player.replay(batch_size=32, num_batches=1)
+			if self.n_games % 30 == 0:
+				self.player.save_model()
 
 	def get_frame(self):
 		frame = self.screen.grabWindow(self.winId()).toImage().convertToFormat(QImage.Format_Grayscale8)
@@ -407,8 +410,9 @@ class Fishbowl(QWidget):
 
 	def _animate_balls(self):
 		while True:
+			self.animation_emitter.emit("act")
 			time.sleep(0.00001)
-			self.animation_emitter.emit("animate")
+			self.animation_emitter.emit("learn")
 
 	def restart_game(self):
 		self.life_loop_counter = 0

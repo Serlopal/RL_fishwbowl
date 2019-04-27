@@ -187,7 +187,7 @@ class Player(NPC):
 		self.curr_state = state
 		self.curr_action = action
 
-	def knowledge2memory(self, terminal_flag, enemies):
+	def remember(self, terminal_flag, enemies):
 		# build next state
 		next_state = self._build_state()
 		# compute reward and check if state is terminal
@@ -195,7 +195,7 @@ class Player(NPC):
 		# reward = 1.0 if not terminal_flag else -10.0
 
 		# store state to memory
-		self.remember(self.curr_state, self.curr_action, reward, next_state, terminal_flag)
+		self.save_to_memory(self.curr_state, self.curr_action, reward, next_state, terminal_flag)
 
 	def _build_state(self):
 		# now build cube
@@ -229,7 +229,7 @@ class Player(NPC):
 	def save_model(self):
 		self.model.save(self.model_name)
 
-	def remember(self, state, action, reward, next_state, done):
+	def save_to_memory(self, state, action, reward, next_state, done):
 		self.memory.append((state, action, reward, next_state, done))
 
 	def choose_action(self, state):
@@ -268,13 +268,10 @@ class Player(NPC):
 				return True
 		return False
 
-	def save_frame(self, frame):
+	def proccess_frame(self, frame):
 		frame = frame[int(0.15*frame.shape[0]):-int(0.15*frame.shape[0]), int(0.25*frame.shape[1]):-int(0.25*frame.shape[1])]
 		frame = resize(frame, (self.frame_size, self.frame_size), interpolation=INTER_CUBIC)
-		while True:
-			self.frame_memory.append(frame)
-			if len(self.frame_memory) >= self.wlen:
-				break
+		return frame
 
 
 class Fishbowl(QWidget):
@@ -322,25 +319,31 @@ class Fishbowl(QWidget):
 		"""
 
 		if command == "act":
-			# current state
-			self.player.save_frame(self.get_frame())
+			# append at least one frame, or fill with the same in the beginning to build a full state
+			while True:
+				frame = self.player.proccess_frame(self.get_frame())
+				self.player.frame_memory.append(frame)
+				if len(self.player.frame_memory) >= self.player.wlen:
+					break
 
 			# issue player action
 			self.player.act()
-			# issue environment reaction
+			# issue enemies reaction
 			for enemy in self.enemies:
 				enemy.move()
 
-			# update state
+			# render new frame state
 			self.repaint()
 		elif command == "learn":
 			# observe next state
-			self.player.save_frame(self.get_frame())
+			frame = self.player.proccess_frame(self.get_frame())
+			# update memory stack with new frame
+			self.player.frame_memory.append(frame)
 
 			# store action knowledge and check if the state is terminal
 			terminal_flag = self.player.check_killed(enemies=self.enemies)
 
-			self.player.knowledge2memory(terminal_flag, self.enemies)
+			self.player.remember(terminal_flag, self.enemies)
 
 			if terminal_flag:
 				self.train_on_memory()

@@ -19,10 +19,6 @@ import numpy as np
 import tensorflow as tf
 
 
-def huber_loss(y_true, y_pred):
-	return tf.losses.huber_loss(y_true, y_pred)
-
-
 def qt_image_to_array(img, share_memory=False):
     """ Creates a numpy array from a QImage.
 
@@ -70,7 +66,7 @@ class DynamicLabel(QLabel):
 
 
 class NPC():
-	allowed_dirs = np.array([np.array(x) for x in [[0, 1], [1, 1], [1, 0], [1, -1], [0, -1], [-1, -1], [-1, 0], [-1, 1]]])
+	allowed_dirs = [np.array(x) for x in [[0, 1], [1, 1], [1, 0], [1, -1], [0, -1], [-1, -1], [-1, 0], [-1, 1]]]
 
 	def __init__(self, pixel_radius, fishbowl_pixel_radius, fishbowl_radius):
 		self.original_coords = np.array([0, 0])
@@ -147,7 +143,7 @@ class Player(NPC):
 
 	def __init__(self, pixel_radius, fishbowl_pixel_radius, fishbowl_radius, state_size):
 		super().__init__(pixel_radius, fishbowl_pixel_radius, fishbowl_radius)
-		self.allowed_dirs = np.vstack([self.allowed_dirs, np.reshape([0, 0], (1, 2))])
+		self.allowed_dirs.append(np.array([0, 0]))
 
 		self.original_coords = np.reshape((np.array([np.random.rand(), np.random.rand()]) * 2) - 1, (1, -1))
 		self.spherical_clip()
@@ -159,7 +155,7 @@ class Player(NPC):
 		# ----------------------------
 		self.state_size = state_size
 		self.action_size = 9
-		self.memory = deque(maxlen=20000)
+		self.memory = deque(maxlen=2000)
 		self.coord_history = deque(maxlen=20)
 		self.gamma = 0.95  # discount rate
 		self.epsilon = 1.0  # 1.0  # exploration rate
@@ -185,12 +181,12 @@ class Player(NPC):
 		self.curr_state = state
 
 		# choose an action
-		action = self.allowed_dirs[self.choose_action(state)]
+		action = self.choose_action(state)
 		# save chosen action
 		self.curr_action = action
 
 		# update player coords
-		self.coords = self.coords + action * self.speed
+		self.coords += self.allowed_dirs[action] * self.speed
 		# save current coords to history of coords
 		self.coord_history.append(self.coords)
 		if not self.inside_sphere():
@@ -227,7 +223,7 @@ class Player(NPC):
 	def _build_model(self):
 		if os.path.exists("model.h5"):
 			print("found previous model	")
-			model = load_model(self.model_name)
+			model = load_model(self.model_name) #, custom_objects={'loss': tf.losses.huber_loss})
 			return model
 		else:
 			# Neural Net for Deep-Q learning Model
@@ -238,7 +234,7 @@ class Player(NPC):
 			model.add(Dense(32, activation='relu'))
 			model.add(Dropout(0.1))
 			model.add(Dense(self.action_size, activation='linear'))
-			model.compile(loss=huber_loss, optimizer=Adam())
+			model.compile(loss="mse", optimizer=Adam())  #loss=tf.losses.huber_loss, optimizer=Adam())
 			return model
 
 	def save_model(self):
@@ -254,19 +250,28 @@ class Player(NPC):
 		return np.argmax(act_values[0])  # returns action
 
 	def replay(self, batch_size, num_batches):
+
+		def get_target_f(sample):
+			state, action, reward, next_state, done = sample
+			if done:
+				target = reward
+			else:
+				target = reward + self.gamma * np.amax(self.model.predict(next_state)[0])
+			target_f = self.model.predict(state)
+			target_f[0][action] = target
+			return target_f
+
 		for _ in range(num_batches):
 			minibatch = random.sample(self.memory, batch_size)
-			for state, action, reward, next_state, done in minibatch:
-				if done:
-					target = reward
-				else:
-					target = reward + self.gamma * np.amax(self.model.predict(next_state)[0])
-				target_f = self.model.predict(state)
-				target_f[0][action] = target
-				self.model.fit(state, target_f, epochs=1, verbose=0)
+			target_fs = list(map(get_target_f, minibatch))
+
+			#  zip together all states, actions, rewards, next_states, dones
+			states, actions, rewards, next_states, dones = map(list, list(zip(*minibatch)))
+
+			self.model.fit(np.concatenate(states, axis=0), np.concatenate(target_fs, axis=0), epochs=1, verbose=0)
+
 		if self.epsilon > self.epsilon_min:
 			self.epsilon *= self.epsilon_decay
-			print(self.epsilon)
 
 	def revive(self):
 		super().revive()
@@ -313,7 +318,7 @@ class Fishbowl(QWidget):
 		self.fishbowl_border_size = self.fishbowl_pixel_radius * 0.004
 		self.fishbowl_thin_border_size = self.fishbowl_pixel_radius * 0.002
 
-		self.nenemies = 8
+		self.nenemies = 4
 		self.enemies = [Enemy(
 			self.npc_pixel_radius, self.fishbowl_pixel_radius, self.fishbowl_radius) for _ in range(self.nenemies)]
 
@@ -439,7 +444,7 @@ class Fishbowl(QWidget):
 	def _animate_balls(self):
 		while True:
 			self.animation_emitter.emit("act")
-			# time.sleep(1)
+			time.sleep(0.001)
 			self.animation_emitter.emit("learn")
 
 	def restart_game(self):
@@ -482,7 +487,7 @@ class gameUI:
 
 		# set layout inside window
 		self.window.setLayout(self.layout)
-		#  self.window.show()
+		self.window.show()
 
 	def start_ui(self):
 		"""

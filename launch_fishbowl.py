@@ -18,6 +18,9 @@ import copy
 import numpy as np
 import tensorflow as tf
 
+def huber_loss(y_true, y_pred):
+	return tf.losses.huber_loss(y_true, y_pred)
+
 
 def qt_image_to_array(img, share_memory=False):
     """ Creates a numpy array from a QImage.
@@ -76,29 +79,16 @@ class NPC():
 		self.color = Qt.black
 		self.coords = self.original_coords
 		self.v = np.array([0, 0])
-		self.speed = 0.05
+		self.speed = 0.1
 		self.pvdi = np.array([0, 0])
 		self.first = True
 		self.dead = False
 
 	def move(self):
-		self.coords = self.coords + self.v
+		self.coords = self.spherical_clip(self.coords + self.v)
 		if not self.inside_sphere() or self.first:
-			# if not self.first:
-			# 	forbidden_dirs = [self.pvdi - 1 if self.pvdi != 0 else len(self.allowed_dirs) - 1,
-			# 					  self.pvdi,
-			# 					  self.pvdi + 1 if self.pvdi != len(self.allowed_dirs) - 1 else 0]
-			# 	available_dirs = np.delete(self.allowed_dirs, forbidden_dirs, axis=0)
-			# 	chosen_dir = np.random.randint(low=0, high=len(available_dirs))
-			# 	self.dir = available_dirs[chosen_dir, :]
-			# 	self.pvdi = np.where(np.all(self.allowed_dirs == self.dir, axis=1))[0][0]
-			# else:
-			# 	chosen_dir = np.random.randint(low=0, high=len(self.allowed_dirs))
-			# 	self.dir = self.allowed_dirs[chosen_dir, :]
-			# 	self.pvdi = chosen_dir
 			self.first = False
 			self.v = np.reshape((np.array([np.random.rand(), np.random.rand()]) * 2) - 1, (1, -1)) * self.speed
-			self.spherical_clip()
 
 	@staticmethod
 	def dist(a, b):
@@ -106,16 +96,16 @@ class NPC():
 
 	def revive(self):
 		self.color = self.original_color
-		self.coords = np.reshape((np.array([np.random.rand(), np.random.rand()]) * 2) - 1, (1, -1))
-		self.spherical_clip()
+		self.coords = self.spherical_clip(np.reshape((np.array([np.random.rand(), np.random.rand()]) * 2) - 1, (1, -1)))
 		self.v = np.array([0, 0])
 		self.first = True
 		self.dead = False
 
-	def spherical_clip(self):
-		dist = np.sqrt(np.sum(self.coords ** 2))
+	def spherical_clip(self, point):
+		dist = np.sqrt(np.sum(point ** 2))
 		if dist > self.fishbowl_radius - self.r:
-			self.coords = self.coords * ((self.fishbowl_radius - self.r) / dist)
+			point = point * ((self.fishbowl_radius - self.r) / dist)
+		return  point
 
 	def inside_sphere(self):
 		dist = np.sqrt(np.sum(self.coords ** 2))
@@ -127,12 +117,11 @@ class NPC():
 
 class Enemy(NPC):
 
-	def __init__(self, pixel_radius, fishbowl_pixel_radius, fishbowl_radius):
+	def __init__(self, pixel_radius, fishbowl_pixel_radius, fishbowl_radius, color):
 		super().__init__(pixel_radius, fishbowl_pixel_radius, fishbowl_radius)
-		self.original_color = Qt.white
+		self.original_color = color
 		self.color = self.original_color
-		self.original_coords = np.reshape((np.array([np.random.rand(), np.random.rand()]) * 2) - 1, (1, -1))
-		self.spherical_clip()
+		self.original_coords = self.spherical_clip(np.reshape((np.array([np.random.rand(), np.random.rand()]) * 2) - 1, (1, -1)))
 		self.coords = self.original_coords
 
 
@@ -145,12 +134,11 @@ class Player(NPC):
 		super().__init__(pixel_radius, fishbowl_pixel_radius, fishbowl_radius)
 		self.allowed_dirs.append(np.array([0, 0]))
 
-		self.original_coords = np.reshape((np.array([np.random.rand(), np.random.rand()]) * 2) - 1, (1, -1))
-		self.spherical_clip()
+		self.original_coords = self.spherical_clip(np.reshape((np.array([np.random.rand(), np.random.rand()]) * 2) - 1, (1, -1)))
 		self.original_color = Qt.black
 		self.color = self.original_color
 		self.coords = self.original_coords
-		self.frame_size = 32
+		self.frame_size = 128
 
 		# ----------------------------
 		self.state_size = state_size
@@ -158,83 +146,55 @@ class Player(NPC):
 		self.memory = deque(maxlen=2000)
 		self.coord_history = deque(maxlen=20)
 		self.gamma = 0.95  # discount rate
-		self.epsilon = 1.0  # 1.0  # exploration rate
+		self.epsilon = 0.0  # 1.0  # exploration rate
 		self.epsilon_min = 0.01
 		self.epsilon_decay = 0.995
 		self.curr_state = None
 		self.curr_action = None
-		self.speed = 0.05
+		self.speed = 0.1
 		# self.learning_rate = 0.001
-		self.wlen = 8
+		self.wlen = 4
 		self.frame_memory = deque(maxlen=self.wlen)
 		self.model_name = "model.h5"
-		self.model = self._build_model()
+		self.model = self.build_model()
 
-	def act(self):  # TODO apparently PEP8 does not let you change the args in an inhereted method...
+	def act(self, state):  # TODO apparently PEP8 does not let you change the args in an inhereted method...
 		"""
 		:param frame: all enemy instances to be considered as inputs to determine where the layer shall move
 		"""
-
-		# build current state
-		state = self._build_state()
-		# store state
-		self.curr_state = state
-
 		# choose an action
 		action = self.choose_action(state)
-		# save chosen action
-		self.curr_action = action
 
 		# update player coords
-		self.coords += self.allowed_dirs[action] * self.speed
-		# save current coords to history of coords
-		self.coord_history.append(self.coords)
-		if not self.inside_sphere():
-			self.spherical_clip()
+		self.coords = self.spherical_clip(self.coords + self.allowed_dirs[action] * self.speed)
 
-	def remember(self, terminal_flag, enemies):
-		# build next state
-		next_state = self._build_state()
-		# compute reward and check if state is terminal
-		# reward = min([self.dist(self.coords, x.coords) for x in enemies]) if not terminal_flag else 0.0
-		# print(self.dist(self.coords, np.mean(np.array(self.coord_history), axis=0)))
-		if terminal_flag:
-			reward = 0
-		else:
-			#  reward = 10 * min([self.dist(self.coords, x.coords) for x in enemies]) + 50 * self.dist(self.coords, np.mean(np.array(self.coord_history), axis=0))
-			reward = 1
-		# print(reward)
-		# store state to memory
-		self.save_to_memory(self.curr_state, self.curr_action, reward, next_state, terminal_flag)
+		return action
 
-	def _build_state(self):
+	def remember(self, state, action, reward, next_state, terminal_flag):
+		self.save_to_memory(state, action, reward, next_state, terminal_flag)
+
+	def build_state(self):
 		# now build cube
-		# stacked_memory = np.stack(self.frame_memory, axis=2)
-		stacked_memory = np.stack(self.frame_memory, axis=0)
+		stacked_memory = np.stack(self.frame_memory, axis=2)
+		# stacked_memory = np.stack(self.frame_memory, axis=0)
 		return np.expand_dims(stacked_memory, axis=0)
 
-	def _coords2grid(self, coords):
-		coords = (coords * (self.frame_size - 1)).astype(int)
-		coords[1] = -coords[1]
-		coords += self.frame_size
-		coords = coords[::-1]
-		return coords
-
-	def _build_model(self):
+	def build_model(self):
 		if os.path.exists("model.h5"):
 			print("found previous model	")
-			model = load_model(self.model_name) #, custom_objects={'loss': tf.losses.huber_loss})
+			model = load_model(self.model_name, custom_objects={'huber_loss': huber_loss})
 			return model
 		else:
 			# Neural Net for Deep-Q learning Model
 			model = Sequential()
-			# model.add(Conv2D(64, kernel_size=5, activation='relu'))
-			# model.add(Conv2D(32, kernel_size=3, activation='relu'))
-			model.add(GRU(64, input_shape=(self.wlen, self.state_size), return_sequences=False))
+			model.add(Conv2D(64, kernel_size=5, activation='relu'))
+			model.add(Conv2D(32, kernel_size=3, activation='relu'))
+			model.add(Flatten())
+			# model.add(GRU(64, input_shape=(self.wlen, self.state_size), return_sequences=False))
 			model.add(Dense(32, activation='relu'))
-			model.add(Dropout(0.1))
+			# model.add(Dropout(0.1))
 			model.add(Dense(self.action_size, activation='linear'))
-			model.compile(loss="mse", optimizer=Adam())  #loss=tf.losses.huber_loss, optimizer=Adam())
+			model.compile(loss=tf.losses.huber_loss, optimizer=Adam())  #loss=tf.losses.huber_loss, optimizer=Adam())
 			return model
 
 	def save_model(self):
@@ -249,7 +209,7 @@ class Player(NPC):
 		act_values = self.model.predict(state)
 		return np.argmax(act_values[0])  # returns action
 
-	def replay(self, batch_size, num_batches):
+	def replay(self, batch_size):
 
 		def get_target_f(sample):
 			state, action, reward, next_state, done = sample
@@ -261,17 +221,28 @@ class Player(NPC):
 			target_f[0][action] = target
 			return target_f
 
-		for _ in range(num_batches):
-			minibatch = random.sample(self.memory, batch_size)
-			target_fs = list(map(get_target_f, minibatch))
+		minibatch = random.sample(self.memory, batch_size)
+		#  minibatch = self.memory
+		target_fs = list(map(get_target_f, minibatch))
 
-			#  zip together all states, actions, rewards, next_states, dones
-			states, actions, rewards, next_states, dones = map(list, list(zip(*minibatch)))
+		#  zip together all states, actions, rewards, next_states, dones
+		states, actions, rewards, next_states, dones = map(list, list(zip(*minibatch)))
 
-			self.model.fit(np.concatenate(states, axis=0), np.concatenate(target_fs, axis=0), epochs=1, verbose=0)
+		terminal_index = rewards.index(0) if 0 in rewards else -1
+		# if terminal_index != -1:
+		# 	terminal_states = states[terminal_index]
+		# 	terminal_next_states = next_states[terminal_index]
+		# 	imwrite("before1.jpg", terminal_states[0, :, :, 0])
+		# 	imwrite("before2.jpg", terminal_states[0, :, :, 1])
+		#
+		# 	imwrite("after1.jpg", terminal_next_states[0, :, :, 0])
+		# 	imwrite("after2.jpg", terminal_next_states[0, :, :, 1])
+
+		self.model.fit(np.concatenate(states, axis=0), np.concatenate(target_fs, axis=0), epochs=1, verbose=False, batch_size=32)
 
 		if self.epsilon > self.epsilon_min:
 			self.epsilon *= self.epsilon_decay
+			print(self.epsilon)
 
 	def revive(self):
 		super().revive()
@@ -290,14 +261,10 @@ class Player(NPC):
 				return True
 		return False
 
-	# def proccess_frame(self, frame):
-	# 	frame = frame[int(0.15*frame.shape[0]):-int(0.15*frame.shape[0]), int(0.25*frame.shape[1]):-int(0.25*frame.shape[1])]
-	# 	frame = resize(frame, (self.frame_size, self.frame_size), interpolation=INTER_CUBIC)
-	# 	return frame
-
-	def proccess_frame(self, enemies):
-		enemies_coords = np.concatenate([x.coords for x in enemies], axis=0)
-		return np.concatenate([enemies_coords, self.coords], axis=0).flatten()
+	def proccess_frame(self, frame):
+		frame = frame[int(0.15*frame.shape[0]):-int(0.15*frame.shape[0]), int(0.25*frame.shape[1]):-int(0.25*frame.shape[1])]
+		frame = resize(frame, (self.frame_size, self.frame_size), interpolation=INTER_CUBIC)
+		return frame
 
 
 class Fishbowl(QWidget):
@@ -309,7 +276,7 @@ class Fishbowl(QWidget):
 		# connect signal from emitter to trigger the animation
 		self.animation_emitter.connect(lambda x: self.life_loop(x))
 
-		self.fishbowl_color = Qt.black
+		self.fishbowl_color = Qt.gray
 		self.fishbowl_radius = 1.0
 		self.fishbowl_pixel_radius = 100
 		self.wheel_size = self.fishbowl_pixel_radius * 1.15
@@ -319,8 +286,9 @@ class Fishbowl(QWidget):
 		self.fishbowl_thin_border_size = self.fishbowl_pixel_radius * 0.002
 
 		self.nenemies = 4
+		colors = [Qt.red, Qt.green, Qt.blue, Qt.yellow, Qt.cyan, Qt.magenta]
 		self.enemies = [Enemy(
-			self.npc_pixel_radius, self.fishbowl_pixel_radius, self.fishbowl_radius) for _ in range(self.nenemies)]
+			self.npc_pixel_radius, self.fishbowl_pixel_radius, self.fishbowl_radius, colors[i]) for i in range(self.nenemies)]
 
 		self.player = Player(
 			self.npc_pixel_radius,
@@ -345,16 +313,23 @@ class Fishbowl(QWidget):
 		"""
 
 		if command == "act":
-			# append at least one frame, or fill with the same in the beginning to build a full state
-			while True:
-				# frame = self.player.proccess_frame(self.get_frame())
-				frame = self.player.proccess_frame(self.enemies)
+			# get first frames into memory
+			while len(self.player.frame_memory) < self.player.wlen:
+				frame = self.player.proccess_frame(self.get_frame())
 				self.player.frame_memory.append(frame)
-				if len(self.player.frame_memory) >= self.player.wlen:
-					break
+
+			# build current state
+			state = self.player.build_state()
+
+			# store state
+			self.player.curr_state = state
 
 			# issue player action
-			self.player.act()
+			action = self.player.act(state)
+
+			# save chosen action
+			self.player.curr_action = action
+
 			# issue enemies reaction
 			for enemy in self.enemies:
 				enemy.move()
@@ -363,16 +338,19 @@ class Fishbowl(QWidget):
 			self.repaint()
 		elif command == "learn":
 			# observe next state
-			# frame = self.player.proccess_frame(self.get_frame())
-			frame = self.player.proccess_frame(self.enemies)
+			frame = self.player.proccess_frame(self.get_frame())
 
 			# update memory stack with new frame
 			self.player.frame_memory.append(frame)
 
+			# build current state
+			next_state = self.player.build_state()
+
 			# store action knowledge and check if the state is terminal
 			terminal_flag = self.player.check_killed(enemies=self.enemies)
+			reward = 0 if terminal_flag else 1
 
-			self.player.remember(terminal_flag, self.enemies)
+			self.player.remember(self.player.curr_state, self.player.curr_action, reward, next_state, terminal_flag)
 
 			if terminal_flag:
 				self.train_on_memory()
@@ -380,9 +358,8 @@ class Fishbowl(QWidget):
 				return
 
 	def train_on_memory(self):
-
 		if len(self.player.memory) > 32:
-			self.player.replay(batch_size=32, num_batches=1)
+			self.player.replay(batch_size=32)
 			if self.n_games % 30 == 0:
 				self.player.save_model()
 
@@ -442,6 +419,8 @@ class Fishbowl(QWidget):
 		self.update_thread.start()
 
 	def _animate_balls(self):
+		time.sleep(2)
+
 		while True:
 			self.animation_emitter.emit("act")
 			time.sleep(0.001)
@@ -500,7 +479,6 @@ class gameUI:
 		"""
 		waits 1 second so that the QT app is running and then launches the ball animation thread
 		"""
-		time.sleep(1)
 		self.fishbowl.animate_balls()
 
 

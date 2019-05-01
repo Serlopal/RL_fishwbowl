@@ -8,7 +8,7 @@ import threading
 from collections import deque
 from keras import Sequential
 from keras.layers import Dense, Conv2D, Flatten, Dropout, MaxPool2D, Conv3D, GRU
-from keras.optimizers import Adam
+from keras.optimizers import *
 from keras.models import load_model
 import random
 import os
@@ -17,9 +17,6 @@ from cv2 import resize, INTER_CUBIC, imwrite
 import copy
 import numpy as np
 import tensorflow as tf
-
-def huber_loss(y_true, y_pred):
-	return tf.losses.huber_loss(y_true, y_pred)
 
 
 def qt_image_to_array(img, share_memory=False):
@@ -79,7 +76,7 @@ class NPC():
 		self.color = Qt.black
 		self.coords = self.original_coords
 		self.v = np.array([0, 0])
-		self.speed = 0.1
+		self.speed = 0.01
 		self.pvdi = np.array([0, 0])
 		self.first = True
 		self.dead = False
@@ -88,7 +85,8 @@ class NPC():
 		self.coords = self.spherical_clip(self.coords + self.v)
 		if not self.inside_sphere() or self.first:
 			self.first = False
-			self.v = np.reshape((np.array([np.random.rand(), np.random.rand()]) * 2) - 1, (1, -1)) * self.speed
+			angle = np.deg2rad(np.random.randint(low=0, high=361, size=1))
+			self.v = self.speed * np.reshape([np.cos(angle), np.sin(angle)], (1, -1))
 
 	@staticmethod
 	def dist(a, b):
@@ -121,7 +119,7 @@ class Enemy(NPC):
 		super().__init__(pixel_radius, fishbowl_pixel_radius, fishbowl_radius)
 		self.original_color = color
 		self.color = self.original_color
-		self.original_coords = self.spherical_clip(np.reshape((np.array([np.random.rand(), np.random.rand()]) * 2) - 1, (1, -1)))
+		self.original_coords = self.spherical_clip(np.reshape([np.random.rand(), np.random.rand()], (1, -1)) * 2 - 1)
 		self.coords = self.original_coords
 
 
@@ -182,19 +180,17 @@ class Player(NPC):
 	def build_model(self):
 		if os.path.exists("model.h5"):
 			print("found previous model	")
-			model = load_model(self.model_name, custom_objects={'huber_loss': huber_loss})
+			model = load_model(self.model_name)  # , custom_objects={'huber_loss': huber_loss})
 			return model
 		else:
 			# Neural Net for Deep-Q learning Model
 			model = Sequential()
-			model.add(Conv2D(64, kernel_size=5, activation='relu'))
-			model.add(Conv2D(32, kernel_size=3, activation='relu'))
+			model.add(Conv2D(16, kernel_size=8, strides=4, activation='relu'))
+			model.add(Conv2D(32, kernel_size=4, strides=2, activation='relu'))
 			model.add(Flatten())
-			# model.add(GRU(64, input_shape=(self.wlen, self.state_size), return_sequences=False))
-			model.add(Dense(32, activation='relu'))
-			# model.add(Dropout(0.1))
+			model.add(Dense(256, activation='relu'))
 			model.add(Dense(self.action_size, activation='linear'))
-			model.compile(loss=tf.losses.huber_loss, optimizer=Adam())  #loss=tf.losses.huber_loss, optimizer=Adam())
+			model.compile(loss="mse", optimizer=RMSprop())  #loss=tf.losses.huber_loss, optimizer=Adam())
 			return model
 
 	def save_model(self):
@@ -246,9 +242,6 @@ class Player(NPC):
 
 	def revive(self):
 		super().revive()
-		if len(self.memory) > 32:
-			self.memory.clear()
-		self.frame_memory.clear()
 
 	def check_killed(self, enemies):
 		p = self.coords
@@ -285,7 +278,7 @@ class Fishbowl(QWidget):
 		self.fishbowl_border_size = self.fishbowl_pixel_radius * 0.004
 		self.fishbowl_thin_border_size = self.fishbowl_pixel_radius * 0.002
 
-		self.nenemies = 4
+		self.nenemies = 3
 		colors = [Qt.red, Qt.green, Qt.blue, Qt.yellow, Qt.cyan, Qt.magenta]
 		self.enemies = [Enemy(
 			self.npc_pixel_radius, self.fishbowl_pixel_radius, self.fishbowl_radius, colors[i]) for i in range(self.nenemies)]

@@ -18,39 +18,7 @@ import copy
 import numpy as np
 import tensorflow as tf
 import pyqtgraph as pg
-
-
-def qt_image_to_array(img, share_memory=False):
-	""" Creates a numpy array from a QImage.
-
-		If share_memory is True, the numpy array and the QImage is shared.
-		Be careful: make sure the numpy array is destroyed before the image,
-		otherwise the array will point to unreserved memory!!
-	"""
-	assert isinstance(img, QImage), "img must be a QtGui.QImage object"
-	assert img.format() == QImage.Format.Format_RGB32, \
-		"img format must be QImage.Format.Format_RGB32, got: {}".format(img.format())
-
-	img_size = img.size()
-	buffer = img.constBits()
-
-	# Sanity check
-	n_bits_buffer = len(buffer) * 8
-	n_bits_image = img_size.width() * img_size.height() * img.depth()
-	assert n_bits_buffer == n_bits_image, \
-		"size mismatch: {} != {}".format(n_bits_buffer, n_bits_image)
-
-	assert img.depth() == 32, "unexpected image depth: {}".format(img.depth())
-
-	# Note the different width height parameter order!
-	arr = np.ndarray(shape=(img_size.height(), img_size.width(), img.depth()//8),
-					 buffer=buffer,
-					 dtype=np.uint8)
-
-	if share_memory:
-		return arr
-	else:
-		return copy.deepcopy(arr)
+import cv2
 
 
 class QSignalViewer(pg.PlotWidget):
@@ -191,27 +159,26 @@ class Player(NPC):
 		self.original_color = Qt.black
 		self.color = self.original_color
 		self.coords = self.original_coords
-		self.frame_size = 32
+		self.frame_size = 84
 
 		# ----------------------------
 		self.state_size = state_size
 		self.action_size = 9
-		self.memory = deque(maxlen=900000)
-		self.coord_history = deque(maxlen=20)
+		self.memory = deque(maxlen=200000)
 		self.gamma = 0.99  # discount rate
 		self.epsilon = 1.0  # 1.0  # exploration rate
 		self.epsilon_min = 0.1
-		self.epsilon_decay = 0.9995
+		self.epsilon_decay = 0.9999
 		self.curr_state = None
 		self.curr_action = 8
 		self.speed = 0.05
 		# self.learning_rate = 0.001
-		self.wlen = 4
+		self.wlen = 1
 		self.frame_memory = deque(maxlen=self.wlen)
 		self.model_name = "model.h5"
 		self.model = self.build_model()
 
-	def act(self, state=None, repeat_action=False):  # TODO apparently PEP8 does not let you change the args in an inhereted method...
+	def act(self, state=None, repeat_action=False, given_action=None):  # TODO apparently PEP8 does not let you change the args in an inhereted method...
 		"""
 		:param frame: all enemy instances to be considered as inputs to determine where the layer shall move
 		"""
@@ -226,12 +193,15 @@ class Player(NPC):
 		elif repeat_action:
 			# update player coords
 			self.coords = self.spherical_clip(self.coords + self.allowed_dirs[self.curr_action] * self.speed)
+		elif given_action is not None:
+			# update player coords
+			self.coords = self.spherical_clip(self.coords + self.allowed_dirs[given_action] * self.speed)
 		else:
 			raise Exception("player needs state or action to act")
 
 	def remember(self, state, action, reward, next_state, terminal_flag):
 		# increase the probability of terminal states being used for training
-		n = 100 if terminal_flag else 1
+		n = 4 if terminal_flag else 1
 		for _ in range(n):
 			self.save_to_memory(state, action, reward, next_state, terminal_flag)
 
@@ -244,17 +214,17 @@ class Player(NPC):
 	def build_model(self):
 		if os.path.exists("model.h5"):
 			print("found previous model	")
-			model = load_model(self.model_name) #, custom_objects={'huber_loss': tf.losses.huber_loss})
+			model = load_model(self.model_name, custom_objects={'huber_loss': tf.losses.huber_loss})
 			return model
 		else:
 			# Neural Net for Deep-Q learning Model
 			model = Sequential()
-			model.add(Conv2D(16, kernel_size=4, strides=2, activation='relu'))
-			model.add(Conv2D(32, kernel_size=2, strides=1, activation='relu'))
+			model.add(Conv2D(16, kernel_size=8, strides=4, activation='relu'))
+			model.add(Conv2D(32, kernel_size=4, strides=2, activation='relu'))
 			model.add(Flatten())
-			model.add(Dense(128, activation='relu'))
+			model.add(Dense(256, activation='relu'))
 			model.add(Dense(self.action_size, activation='linear'))
-			model.compile(loss="mse", optimizer=RMSprop(lr=0.00025, rho=0.95, epsilon=0.01))
+			model.compile(loss=tf.losses.huber_loss, optimizer=RMSprop(lr=0.00025, rho=0.95, epsilon=0.01))
 			return model
 
 	def save_model(self):
@@ -300,13 +270,14 @@ class Player(NPC):
 		for enemy in enemies:
 			e = enemy.coords
 			dist = self.dist(e, p)
-			if dist < 2*self.r:  # two balls touching, 2 radius
+			if dist < (self.r + enemy.r):  # two balls touching, 2 radius
 				return True
 		return False
 
 	def process_frame(self, frame):
 		frame = frame[int(0.15*frame.shape[0]):-int(0.15*frame.shape[0]), int(0.3*frame.shape[1]):-int(0.3*frame.shape[1])]
 		frame = resize(frame, (self.frame_size, self.frame_size), interpolation=INTER_NEAREST )
+		# cv2.imwrite("asd.jpg", frame)
 		return frame
 
 
@@ -324,7 +295,11 @@ class Fishbowl(QWidget):
 		self.fishbowl_pixel_radius = 100
 		self.wheel_size = self.fishbowl_pixel_radius * 1.15
 		self.wheel_width = self.fishbowl_pixel_radius * 0.15
+
 		self.npc_pixel_radius = self.fishbowl_pixel_radius * 0.05
+		self.reward_pixel_radius = self.fishbowl_pixel_radius * 0.1
+		self.player_pixel_radius = self.fishbowl_pixel_radius * 0.075
+
 		self.fishbowl_border_size = self.fishbowl_pixel_radius * 0.004
 		self.fishbowl_thin_border_size = self.fishbowl_pixel_radius * 0.002
 
@@ -333,7 +308,7 @@ class Fishbowl(QWidget):
 		self.enemies = [Enemy(
 			self.npc_pixel_radius, self.fishbowl_pixel_radius, self.fishbowl_radius, Qt.white) for i in range(self.nenemies)]
 
-		self.reward = Reward(self.npc_pixel_radius, self.fishbowl_pixel_radius, self.fishbowl_radius, Qt.red)
+		self.reward = Reward(self.reward_pixel_radius, self.fishbowl_pixel_radius, self.fishbowl_radius, Qt.red)
 		self.curr_reward_flag = False
 
 		self.player = Player(
@@ -344,6 +319,9 @@ class Fishbowl(QWidget):
 
 		self.episode_reward = 0
 		self.reward_memory = deque(maxlen=100)
+		self.min_memory_to_train = 2000
+		self.max_episode_len = 10000
+		self.episode_counter = 0
 
 		self.n_games = 1
 		self.info_signal = info_signal
@@ -362,7 +340,10 @@ class Fishbowl(QWidget):
 		in which we move around players, check who is dead and so on
 		"""
 
+		self.episode_counter += 1
+
 		if command == "act":
+
 			# get first frames into memory
 			while len(self.player.frame_memory) < self.player.wlen:
 				frame = self.player.process_frame(self.get_frame())
@@ -374,15 +355,19 @@ class Fishbowl(QWidget):
 			# store state before moving
 			self.player.curr_state = state
 
-			# issue player action
-			action = self.player.act(state)
+			if len(self.player.memory) < self.min_memory_to_train:
+				action = np.random.randint(low=0, high=self.player.action_size)
+				self.player.act(given_action=action)
+			else:
+				# issue player action
+				action = self.player.act(state)
 
 			# save chosen action
 			self.player.curr_action = action
 
 			# issue enemies reaction
-			for enemy in self.enemies:
-				enemy.move()
+			# for enemy in self.enemies:
+			# 	enemy.move()
 
 			# render new frame state
 			self.repaint()
@@ -397,13 +382,18 @@ class Fishbowl(QWidget):
 			self.player.act(repeat_action=True)
 
 			# issue enemies reaction
-			for enemy in self.enemies:
-				enemy.move()
+			# for enemy in self.enemies:
+			# 	enemy.move()
 
 			# render new frame state
 			self.repaint()
 
 		elif command == "learn":
+
+			if self.episode_counter > self.max_episode_len:
+				self.restart_game()
+				return
+
 			# observe next state
 			frame = self.player.process_frame(self.get_frame())
 
@@ -417,14 +407,13 @@ class Fishbowl(QWidget):
 			terminal_flag_lost = self.player.check_killed(enemies=self.enemies)
 			terminal_flag_won = self.player.check_killed([self.reward])
 			terminal_flag = terminal_flag_lost or terminal_flag_won
-			if terminal_flag_lost and terminal_flag_won:
-				reward = -100
-			elif terminal_flag_lost:
-				reward = -100
+
+			if terminal_flag_lost or (terminal_flag_lost and terminal_flag_won):
+				reward = -1
 			elif terminal_flag_won:
-				reward = 100
+				reward = +1
 			else:
-				reward = 0
+				reward = -0.01
 
 			# add reward to episode sum
 			self.episode_reward += reward
@@ -432,7 +421,8 @@ class Fishbowl(QWidget):
 			self.player.remember(self.player.curr_state, self.player.curr_action, reward, next_state, terminal_flag)
 
 			if terminal_flag:
-				self.train_on_memory()
+				if len(self.player.memory) > self.min_memory_to_train:
+					self.train_on_memory()
 				self.restart_game()
 				return
 
@@ -447,6 +437,7 @@ class Fishbowl(QWidget):
 		h, w = frame.height(), frame.width()
 		s = frame.bits().asstring(w * h * 1)
 		arr = np.fromstring(s, dtype=np.uint8).reshape((h, w, 1))
+
 		return arr
 
 	def paintEvent(self, e):
@@ -490,11 +481,11 @@ class Fishbowl(QWidget):
 
 		# draw player
 		qp.setBrush(QBrush(self.player.color, Qt.SolidPattern))
-		qp.drawEllipse(c + QPoint(*self.scale_point(np.squeeze(self.player.coords))), *([self.npc_pixel_radius] * 2))
+		qp.drawEllipse(c + QPoint(*self.scale_point(np.squeeze(self.player.coords))), *([self.player_pixel_radius] * 2))
 
 		# draw reward
 		qp.setBrush(QBrush(self.reward.color, Qt.SolidPattern))
-		qp.drawEllipse(c + QPoint(*self.scale_point(np.squeeze(self.reward.coords))), *([self.npc_pixel_radius] * 2))
+		qp.drawEllipse(c + QPoint(*self.scale_point(np.squeeze(self.reward.coords))), *([self.reward_pixel_radius] * 2))
 
 	def animate_balls(self):
 		self.update_thread = threading.Thread(target=self._animate_balls)
@@ -513,7 +504,8 @@ class Fishbowl(QWidget):
 
 	def restart_game(self):
 		self.n_games += 1
-		self.info_signal.emit("Game {0} - Exploration Rate {1}".format(self.n_games, np.round(self.player.epsilon, 5)))
+		self.info_signal.emit("Game {0} - Exploration Rate {1} - {2}".format(
+			self.n_games, np.round(self.player.epsilon, 5), "Training" if len(self.player.memory) > self.min_memory_to_train else "Memory size {}".format(len(self.player.memory))))
 		for enemy in self.enemies:
 			enemy.revive()
 		self.player.revive()
@@ -522,7 +514,9 @@ class Fishbowl(QWidget):
 		self.reward_memory.append(self.episode_reward)
 		# emit and reset episode reward
 		self.viewer_signal.emit(np.round(np.mean(self.reward_memory), 2))
+		print(np.round(np.mean(self.reward_memory), 2))
 		self.episode_reward = 0.0
+		self.episode_counter = 0
 
 
 class gameUI:
@@ -542,18 +536,17 @@ class gameUI:
 		# set window geometry
 		ag = QDesktopWidget().availableGeometry()
 		self.window.move(int(ag.width()*0.15), int(ag.height()*0.05))
-		self.window.setMinimumWidth(int(ag.width()*0.6))
+		self.window.setMinimumWidth(int(ag.width()*0.3))
 		self.window.setMinimumHeight(int(ag.height()*0.4))
 
 		self.layout = QGridLayout()
 		self.n_games_label = DynamicLabel("Game ")
-		self.layout.addWidget(self.n_games_label, 0, 0, 1, 10)
-
 		self.signal_viewer = QSignalViewer(1)
 		self.fishbowl = Fishbowl(self.n_games_label.signal, self.signal_viewer.emitter)
 
+		self.layout.addWidget(self.n_games_label, 0, 0, 1, 10)
 		self.layout.addWidget(self.fishbowl, 1, 0, 10, 10)
-		self.layout.addWidget(self.signal_viewer, 1, 10, 10, 10)
+		# self.layout.addWidget(self.signal_viewer, 1, 10, 10, 10)
 
 		self.main_group.setLayout(self.layout)
 

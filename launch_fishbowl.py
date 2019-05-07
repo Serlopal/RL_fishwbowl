@@ -117,22 +117,22 @@ class NPC():
 		self.first = True
 		self.dead = False
 
-	def move_old(self):
+	def move(self):
 		self.coords = self.spherical_clip(self.coords + self.v)
 		if not self.inside_sphere() or self.first:
 			self.first = False
 			angle = np.deg2rad(np.random.randint(low=0, high=361, size=1))
 			self.v = self.speed * np.reshape([np.cos(angle), np.sin(angle)], (1, -1))
 
-	def move(self):
-		self.coords = self.spherical_clip(self.coords + self.v)
-		if not self.inside_sphere() or self.first:
-			if self.first:
-				angle = np.deg2rad(np.random.randint(low=0, high=361, size=1))
-				self.v = self.speed * np.reshape([np.cos(angle), np.sin(angle)], (1, -1))
-				self.first = False
-			else:
-				self.v *= np.array([-1, -1])
+	# def move(self):
+	# 	self.coords = self.spherical_clip(self.coords + self.v)
+	# 	if not self.inside_sphere() or self.first:
+	# 		if self.first:
+	# 			angle = np.deg2rad(np.random.randint(low=0, high=361, size=1))
+	# 			self.v = self.speed * np.reshape([np.cos(angle), np.sin(angle)], (1, -1))
+	# 			self.first = False
+	# 		else:
+	# 			self.v *= np.array([-1, -1])
 
 	@staticmethod
 	def dist(a, b):
@@ -201,12 +201,16 @@ class Player(NPC):
 		self.gamma = 0.99  # discount rate
 		self.epsilon = 1.0  # 1.0  # exploration rate
 		self.epsilon_min = 0.1
-		self.epsilon_decay = 0.9995
+		self.epsilon_decay = 0.995
 		self.curr_state = None
 		self.curr_action = 8
 		self.speed = 0.05
-		# self.learning_rate = 0.001
-		self.wlen = 4
+
+		self.update_target_freq = 10000
+
+		self.sample_qvalues = None
+
+		self.wlen = 1
 		self.frame_memory = deque(maxlen=self.wlen)
 		self.model_name = "model.h5"
 		self.model = self.build_model()
@@ -284,11 +288,12 @@ class Player(NPC):
 		minibatch = random.sample(self.memory, batch_size)
 		#  minibatch = self.memory
 		target_fs = list(map(get_target_f, minibatch))
+		print(np.round(target_fs, 2))
 
 		#  zip together all states, actions, rewards, next_states, dones
 		states, actions, rewards, next_states, dones = map(list, list(zip(*minibatch)))
 
-		self.model.fit(np.concatenate(states, axis=0)/255, np.concatenate(target_fs, axis=0), epochs=1, verbose=False, batch_size=32)
+		self.model.fit(np.concatenate(states, axis=0), np.concatenate(target_fs, axis=0), epochs=1, verbose=False, batch_size=32)
 		if self.epsilon > self.epsilon_min:
 			self.epsilon *= self.epsilon_decay
 
@@ -307,7 +312,7 @@ class Player(NPC):
 	def process_frame(self, frame):
 		frame = frame[int(0.15*frame.shape[0]):-int(0.15*frame.shape[0]), int(0.3*frame.shape[1]):-int(0.3*frame.shape[1])]
 		frame = resize(frame, (self.frame_size, self.frame_size), interpolation=INTER_NEAREST )
-		return frame
+		return frame/255
 
 
 class Fishbowl(QWidget):
@@ -325,6 +330,10 @@ class Fishbowl(QWidget):
 		self.wheel_size = self.fishbowl_pixel_radius * 1.15
 		self.wheel_width = self.fishbowl_pixel_radius * 0.15
 		self.npc_pixel_radius = self.fishbowl_pixel_radius * 0.05
+
+		# self.reward_pixel_radius = self.fishbowl_pixel_radius * 0.1
+		self.player_pixel_radius = self.fishbowl_pixel_radius * 0.075
+
 		self.fishbowl_border_size = self.fishbowl_pixel_radius * 0.004
 		self.fishbowl_thin_border_size = self.fishbowl_pixel_radius * 0.002
 
@@ -333,7 +342,6 @@ class Fishbowl(QWidget):
 		self.enemies = [Enemy(
 			self.npc_pixel_radius, self.fishbowl_pixel_radius, self.fishbowl_radius, Qt.white) for i in range(self.nenemies)]
 
-		self.reward = Reward(self.npc_pixel_radius, self.fishbowl_pixel_radius, self.fishbowl_radius, Qt.red)
 		self.curr_reward_flag = False
 
 		self.player = Player(
@@ -344,6 +352,10 @@ class Fishbowl(QWidget):
 
 		self.episode_reward = 0
 		self.reward_memory = deque(maxlen=100)
+		self.observe_iterations = 2000
+		self.max_episode_len = 800
+		self.episode_t = 0
+		self.global_t = 0
 
 		self.n_games = 1
 		self.info_signal = info_signal
@@ -389,7 +401,7 @@ class Fishbowl(QWidget):
 
 		elif command == "repeat_action":
 			# check game has finished
-			terminal_flag = self.player.check_killed(enemies=self.enemies) or self.player.check_killed([self.reward])
+			terminal_flag = self.player.check_killed(enemies=self.enemies)# or self.player.check_killed([self.reward])
 			if terminal_flag:
 				return
 
@@ -414,18 +426,11 @@ class Fishbowl(QWidget):
 			next_state = self.player.build_state()
 
 			# store action knowledge and check if the state is terminal
-			terminal_flag_lost = self.player.check_killed(enemies=self.enemies)
-			terminal_flag_won = self.player.check_killed([self.reward])
-			terminal_flag = terminal_flag_lost or terminal_flag_won
-			if terminal_flag_lost and terminal_flag_won:
-				reward = -100
-			elif terminal_flag_lost:
-				reward = -100
-			elif terminal_flag_won:
-				reward = 100
+			terminal_flag = self.player.check_killed(enemies=self.enemies)
+			if terminal_flag:
+				reward = -1
 			else:
-				reward = 0
-
+				reward = 1
 			# add reward to episode sum
 			self.episode_reward += reward
 
@@ -433,6 +438,10 @@ class Fishbowl(QWidget):
 
 			if terminal_flag:
 				self.train_on_memory()
+				if len(self.player.memory) > self.observe_iterations:
+					self.player.replay(batch_size=32, t=self.global_t)
+					if self.n_games % 1000 == 0:
+						self.player.save_model()
 				self.restart_game()
 				return
 
@@ -492,10 +501,6 @@ class Fishbowl(QWidget):
 		qp.setBrush(QBrush(self.player.color, Qt.SolidPattern))
 		qp.drawEllipse(c + QPoint(*self.scale_point(np.squeeze(self.player.coords))), *([self.npc_pixel_radius] * 2))
 
-		# draw reward
-		qp.setBrush(QBrush(self.reward.color, Qt.SolidPattern))
-		qp.drawEllipse(c + QPoint(*self.scale_point(np.squeeze(self.reward.coords))), *([self.npc_pixel_radius] * 2))
-
 	def animate_balls(self):
 		self.update_thread = threading.Thread(target=self._animate_balls)
 		self.update_thread.daemon = True
@@ -517,7 +522,7 @@ class Fishbowl(QWidget):
 		for enemy in self.enemies:
 			enemy.revive()
 		self.player.revive()
-		self.reward.revive()
+		# self.reward.revive()
 		# save reward for espisode
 		self.reward_memory.append(self.episode_reward)
 		# emit and reset episode reward
@@ -542,8 +547,8 @@ class gameUI:
 		# set window geometry
 		ag = QDesktopWidget().availableGeometry()
 		self.window.move(int(ag.width()*0.15), int(ag.height()*0.05))
-		self.window.setMinimumWidth(int(ag.width()*0.6))
-		self.window.setMinimumHeight(int(ag.height()*0.4))
+		self.window.setMinimumWidth(int(ag.width()*0.2))
+		self.window.setMinimumHeight(int(ag.height()*0.3))
 
 		self.layout = QGridLayout()
 		self.n_games_label = DynamicLabel("Game ")
@@ -553,7 +558,7 @@ class gameUI:
 		self.fishbowl = Fishbowl(self.n_games_label.signal, self.signal_viewer.emitter)
 
 		self.layout.addWidget(self.fishbowl, 1, 0, 10, 10)
-		self.layout.addWidget(self.signal_viewer, 1, 10, 10, 10)
+		# self.layout.addWidget(self.signal_viewer, 1, 10, 10, 10)
 
 		self.main_group.setLayout(self.layout)
 

@@ -18,39 +18,7 @@ import copy
 import numpy as np
 import tensorflow as tf
 import pyqtgraph as pg
-
-
-def qt_image_to_array(img, share_memory=False):
-	""" Creates a numpy array from a QImage.
-
-		If share_memory is True, the numpy array and the QImage is shared.
-		Be careful: make sure the numpy array is destroyed before the image,
-		otherwise the array will point to unreserved memory!!
-	"""
-	assert isinstance(img, QImage), "img must be a QtGui.QImage object"
-	assert img.format() == QImage.Format.Format_RGB32, \
-		"img format must be QImage.Format.Format_RGB32, got: {}".format(img.format())
-
-	img_size = img.size()
-	buffer = img.constBits()
-
-	# Sanity check
-	n_bits_buffer = len(buffer) * 8
-	n_bits_image = img_size.width() * img_size.height() * img.depth()
-	assert n_bits_buffer == n_bits_image, \
-		"size mismatch: {} != {}".format(n_bits_buffer, n_bits_image)
-
-	assert img.depth() == 32, "unexpected image depth: {}".format(img.depth())
-
-	# Note the different width height parameter order!
-	arr = np.ndarray(shape=(img_size.height(), img_size.width(), img.depth()//8),
-					 buffer=buffer,
-					 dtype=np.uint8)
-
-	if share_memory:
-		return arr
-	else:
-		return copy.deepcopy(arr)
+import cv2
 
 
 class QSignalViewer(pg.PlotWidget):
@@ -124,15 +92,15 @@ class NPC():
 			angle = np.deg2rad(np.random.randint(low=0, high=361, size=1))
 			self.v = self.speed * np.reshape([np.cos(angle), np.sin(angle)], (1, -1))
 
-	# def move(self):
-	# 	self.coords = self.spherical_clip(self.coords + self.v)
-	# 	if not self.inside_sphere() or self.first:
-	# 		if self.first:
-	# 			angle = np.deg2rad(np.random.randint(low=0, high=361, size=1))
-	# 			self.v = self.speed * np.reshape([np.cos(angle), np.sin(angle)], (1, -1))
-	# 			self.first = False
-	# 		else:
-	# 			self.v *= np.array([-1, -1])
+	def move_fixed_angle(self):
+		self.coords = self.spherical_clip(self.coords + self.v)
+		if not self.inside_sphere() or self.first:
+			if self.first:
+				angle = np.deg2rad(np.random.randint(low=0, high=361, size=1))
+				self.v = self.speed * np.reshape([np.cos(angle), np.sin(angle)], (1, -1))
+				self.first = False
+			else:
+				self.v *= np.array([-1, -1])
 
 	@staticmethod
 	def dist(a, b):
@@ -185,7 +153,7 @@ class Player(NPC):
 
 	def __init__(self, pixel_radius, fishbowl_pixel_radius, fishbowl_radius, state_size):
 		super().__init__(pixel_radius, fishbowl_pixel_radius, fishbowl_radius)
-		self.allowed_dirs.append(np.array([0, 0]))
+		# self.allowed_dirs.append(np.array([0, 0]))
 
 		self.original_coords = self.spherical_clip(np.reshape((np.array([np.random.rand(), np.random.rand()]) * 2) - 1, (1, -1)))
 		self.original_color = Qt.black
@@ -195,30 +163,25 @@ class Player(NPC):
 
 		# ----------------------------
 		self.state_size = state_size
-		self.action_size = 9
-		self.memory = deque(maxlen=900000)
-		self.coord_history = deque(maxlen=20)
+		self.action_size = 8
+		self.memory = deque(maxlen=200000)
 		self.gamma = 0.99  # discount rate
 		self.epsilon = 1.0  # 1.0  # exploration rate
 		self.epsilon_min = 0.1
-		self.epsilon_decay = 0.995
+		self.epsilon_decay = 0.99996
 		self.curr_state = None
 		self.curr_action = 8
 		self.speed = 0.05
 
 		self.update_target_freq = 10000
 
-		self.sample_qvalues = None
-
-		self.wlen = 1
+		self.wlen = 4
 		self.frame_memory = deque(maxlen=self.wlen)
 		self.model_name = "model.h5"
 		self.model = self.build_model()
+		self.target_model = self.build_model()
 
-	def act(self, state=None, repeat_action=False):  # TODO apparently PEP8 does not let you change the args in an inhereted method...
-		"""
-		:param frame: all enemy instances to be considered as inputs to determine where the layer shall move
-		"""
+	def act(self, state=None, repeat_action=False, given_action=None):  # TODO apparently PEP8 does not let you change the args in an inhereted method...
 		if state is not None:
 			# choose an action
 			action = self.choose_action(state)
@@ -230,12 +193,15 @@ class Player(NPC):
 		elif repeat_action:
 			# update player coords
 			self.coords = self.spherical_clip(self.coords + self.allowed_dirs[self.curr_action] * self.speed)
+		elif given_action is not None:
+			# update player coords
+			self.coords = self.spherical_clip(self.coords + self.allowed_dirs[given_action] * self.speed)
 		else:
 			raise Exception("player needs state or action to act")
 
 	def remember(self, state, action, reward, next_state, terminal_flag):
 		# increase the probability of terminal states being used for training
-		n = 100 if terminal_flag else 1
+		n = 4 if reward > 0 else 1
 		for _ in range(n):
 			self.save_to_memory(state, action, reward, next_state, terminal_flag)
 
@@ -248,7 +214,7 @@ class Player(NPC):
 	def build_model(self):
 		if os.path.exists("model.h5"):
 			print("found previous model	")
-			model = load_model(self.model_name) #, custom_objects={'huber_loss': tf.losses.huber_loss})
+			model = load_model(self.model_name, custom_objects={'huber_loss': tf.losses.huber_loss})
 			return model
 		else:
 			# Neural Net for Deep-Q learning Model
@@ -258,7 +224,7 @@ class Player(NPC):
 			model.add(Flatten())
 			model.add(Dense(128, activation='relu'))
 			model.add(Dense(self.action_size, activation='linear'))
-			model.compile(loss="mse", optimizer=RMSprop(lr=0.00025, rho=0.95, epsilon=0.01))
+			model.compile(loss=tf.losses.huber_loss, optimizer=RMSprop(lr=0.00025, rho=0.95, epsilon=0.01))
 			return model
 
 	def save_model(self):
@@ -273,26 +239,26 @@ class Player(NPC):
 		act_values = self.model.predict(state)
 		return np.argmax(act_values[0])  # returns action
 
-	def replay(self, batch_size):
+	def replay(self, batch_size, t):
 
 		def get_target_f(sample):
 			state, action, reward, next_state, done = sample
 			if done:
 				target = reward
 			else:
-				target = reward + self.gamma * np.amax(self.model.predict(next_state)[0])
+				target = reward + self.gamma * np.clip(np.amax(self.target_model.predict(next_state)[0]), -1, 1)
+
 			target_f = self.model.predict(state)
 			target_f[0][action] = target
 			return target_f
 
 		minibatch = random.sample(self.memory, batch_size)
+
 		#  minibatch = self.memory
 		target_fs = list(map(get_target_f, minibatch))
-		print(np.round(target_fs, 2))
 
 		#  zip together all states, actions, rewards, next_states, dones
 		states, actions, rewards, next_states, dones = map(list, list(zip(*minibatch)))
-
 		self.model.fit(np.concatenate(states, axis=0), np.concatenate(target_fs, axis=0), epochs=1, verbose=False, batch_size=32)
 		if self.epsilon > self.epsilon_min:
 			self.epsilon *= self.epsilon_decay
@@ -305,14 +271,19 @@ class Player(NPC):
 		for enemy in enemies:
 			e = enemy.coords
 			dist = self.dist(e, p)
-			if dist < 2*self.r:  # two balls touching, 2 radius
+			if dist < (self.r + enemy.r):  # two balls touching, 2 radius
 				return True
 		return False
 
 	def process_frame(self, frame):
 		frame = frame[int(0.15*frame.shape[0]):-int(0.15*frame.shape[0]), int(0.3*frame.shape[1]):-int(0.3*frame.shape[1])]
 		frame = resize(frame, (self.frame_size, self.frame_size), interpolation=INTER_NEAREST )
+		# cv2.imwrite("asd.jpg", frame)
 		return frame/255
+
+	def update_target_model(self):
+		# copy weights from model to target_model
+		self.target_model.set_weights(self.model.get_weights())
 
 
 class Fishbowl(QWidget):
@@ -329,15 +300,14 @@ class Fishbowl(QWidget):
 		self.fishbowl_pixel_radius = 100
 		self.wheel_size = self.fishbowl_pixel_radius * 1.15
 		self.wheel_width = self.fishbowl_pixel_radius * 0.15
-		self.npc_pixel_radius = self.fishbowl_pixel_radius * 0.05
 
-		# self.reward_pixel_radius = self.fishbowl_pixel_radius * 0.1
+		self.npc_pixel_radius = self.fishbowl_pixel_radius * 0.05
 		self.player_pixel_radius = self.fishbowl_pixel_radius * 0.075
 
 		self.fishbowl_border_size = self.fishbowl_pixel_radius * 0.004
 		self.fishbowl_thin_border_size = self.fishbowl_pixel_radius * 0.002
 
-		self.nenemies = 3
+		self.nenemies = 6
 		colors = [Qt.red, Qt.green, Qt.blue, Qt.yellow, Qt.cyan, Qt.magenta]
 		self.enemies = [Enemy(
 			self.npc_pixel_radius, self.fishbowl_pixel_radius, self.fishbowl_radius, Qt.white) for i in range(self.nenemies)]
@@ -353,7 +323,7 @@ class Fishbowl(QWidget):
 		self.episode_reward = 0
 		self.reward_memory = deque(maxlen=100)
 		self.observe_iterations = 2000
-		self.max_episode_len = 800
+		self.max_episode_len = 400
 		self.episode_t = 0
 		self.global_t = 0
 
@@ -376,9 +346,8 @@ class Fishbowl(QWidget):
 
 		if command == "act":
 			# get first frames into memory
-			while len(self.player.frame_memory) < self.player.wlen:
-				frame = self.player.process_frame(self.get_frame())
-				self.player.frame_memory.append(frame)
+			frame = self.player.process_frame(self.get_frame())
+			self.player.frame_memory.append(frame)
 
 			# build current state
 			state = self.player.build_state()
@@ -386,8 +355,12 @@ class Fishbowl(QWidget):
 			# store state before moving
 			self.player.curr_state = state
 
-			# issue player action
-			action = self.player.act(state)
+			if len(self.player.memory) < self.observe_iterations:
+				action = np.random.randint(low=0, high=self.player.action_size)
+				self.player.act(given_action=action)
+			else:
+				# issue player action
+				action = self.player.act(state)
 
 			# save chosen action
 			self.player.curr_action = action
@@ -401,7 +374,7 @@ class Fishbowl(QWidget):
 
 		elif command == "repeat_action":
 			# check game has finished
-			terminal_flag = self.player.check_killed(enemies=self.enemies)# or self.player.check_killed([self.reward])
+			terminal_flag = self.player.check_killed(enemies=self.enemies)
 			if terminal_flag:
 				return
 
@@ -416,46 +389,59 @@ class Fishbowl(QWidget):
 			self.repaint()
 
 		elif command == "learn":
-			# observe next state
+
+			# if episode has taken too much time, end it
+			if self.episode_t > self.max_episode_len:
+				self.restart_game()
+				return
+
+			# observe state after movement
 			frame = self.player.process_frame(self.get_frame())
 
 			# update memory stack with new frame
 			self.player.frame_memory.append(frame)
-
-			# build current state
+			# build next state
 			next_state = self.player.build_state()
 
-			# store action knowledge and check if the state is terminal
+			# check if the state is terminal
 			terminal_flag = self.player.check_killed(enemies=self.enemies)
+
+			# build reward depending on terminal flag
 			if terminal_flag:
 				reward = -1
 			else:
-				reward = 1
-			# add reward to episode sum
+				reward = +1
+
+			# add reward to episode sum for performance tracking
 			self.episode_reward += reward
 
+			# store movement experience to memory
 			self.player.remember(self.player.curr_state, self.player.curr_action, reward, next_state, terminal_flag)
 
+			# increase global and episodic counter
+			self.global_t += 1
+			self.episode_t += 1
+
+			# update target network if it is time to
+			if self.global_t % self.player.update_target_freq == 0:
+				print("updating target network")
+				self.player.update_target_model()
+
+			# check game is over. If so, train the model if our memory is populated
 			if terminal_flag:
-				self.train_on_memory()
 				if len(self.player.memory) > self.observe_iterations:
 					self.player.replay(batch_size=32, t=self.global_t)
-					if self.n_games % 1000 == 0:
+					if self.n_games % 300 == 0:
 						self.player.save_model()
 				self.restart_game()
 				return
-
-	def train_on_memory(self):
-		if len(self.player.memory) > 32:
-			self.player.replay(batch_size=32)
-			if self.n_games % 300 == 0:
-				self.player.save_model()
 
 	def get_frame(self):
 		frame = self.screen.grabWindow(self.winId()).toImage().convertToFormat(QImage.Format_Grayscale8)
 		h, w = frame.height(), frame.width()
 		s = frame.bits().asstring(w * h * 1)
 		arr = np.fromstring(s, dtype=np.uint8).reshape((h, w, 1))
+
 		return arr
 
 	def paintEvent(self, e):
@@ -499,7 +485,7 @@ class Fishbowl(QWidget):
 
 		# draw player
 		qp.setBrush(QBrush(self.player.color, Qt.SolidPattern))
-		qp.drawEllipse(c + QPoint(*self.scale_point(np.squeeze(self.player.coords))), *([self.npc_pixel_radius] * 2))
+		qp.drawEllipse(c + QPoint(*self.scale_point(np.squeeze(self.player.coords))), *([self.player_pixel_radius] * 2))
 
 	def animate_balls(self):
 		self.update_thread = threading.Thread(target=self._animate_balls)
@@ -513,21 +499,21 @@ class Fishbowl(QWidget):
 			self.animation_emitter.emit("act")
 			for _ in range(3):
 				self.animation_emitter.emit("repeat_action")
-			time.sleep(0.01)
+			time.sleep(0.000001)
 			self.animation_emitter.emit("learn")
 
 	def restart_game(self):
 		self.n_games += 1
-		self.info_signal.emit("Game {0} - Exploration Rate {1}".format(self.n_games, np.round(self.player.epsilon, 5)))
+		self.info_signal.emit("Game {0} - Exploration Rate {1} - {2}".format(
+			self.n_games, np.round(self.player.epsilon, 5), "Training" if len(self.player.memory) > self.observe_iterations else "Memory size {}".format(len(self.player.memory))))
 		for enemy in self.enemies:
 			enemy.revive()
 		self.player.revive()
-		# self.reward.revive()
 		# save reward for espisode
 		self.reward_memory.append(self.episode_reward)
 		# emit and reset episode reward
-		self.viewer_signal.emit(np.round(np.mean(self.reward_memory), 2))
 		self.episode_reward = 0.0
+		self.episode_t = 0
 
 
 class gameUI:
@@ -547,16 +533,15 @@ class gameUI:
 		# set window geometry
 		ag = QDesktopWidget().availableGeometry()
 		self.window.move(int(ag.width()*0.15), int(ag.height()*0.05))
-		self.window.setMinimumWidth(int(ag.width()*0.2))
-		self.window.setMinimumHeight(int(ag.height()*0.3))
+		self.window.setMinimumWidth(int(ag.width()*0.3))
+		self.window.setMinimumHeight(int(ag.height()*0.4))
 
 		self.layout = QGridLayout()
 		self.n_games_label = DynamicLabel("Game ")
-		self.layout.addWidget(self.n_games_label, 0, 0, 1, 10)
-
 		self.signal_viewer = QSignalViewer(1)
 		self.fishbowl = Fishbowl(self.n_games_label.signal, self.signal_viewer.emitter)
 
+		self.layout.addWidget(self.n_games_label, 0, 0, 1, 10)
 		self.layout.addWidget(self.fishbowl, 1, 0, 10, 10)
 		# self.layout.addWidget(self.signal_viewer, 1, 10, 10, 10)
 

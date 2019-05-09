@@ -160,6 +160,7 @@ class Player(NPC):
 		self.color = self.original_color
 		self.coords = self.original_coords
 		self.frame_size = 84
+		self.frame_skip = 4
 
 		# ----------------------------
 		self.state_size = state_size
@@ -174,8 +175,8 @@ class Player(NPC):
 		self.speed = 0.05
 
 		self.update_target_freq = 10000
-		self.save_model_step = 10000
-		self.observe_iterations = 200
+		self.save_model_step = 4000
+		self.observe_iterations = 20000
 
 		self.wlen = 4
 		self.frame_memory = deque(maxlen=self.wlen)
@@ -209,7 +210,7 @@ class Player(NPC):
 
 	def build_state(self):
 		# now build cube
-		stacked_memory = np.stack(self.frame_memory, axis=2)/255
+		stacked_memory = np.stack(self.frame_memory, axis=2)
 		return np.expand_dims(stacked_memory, axis=0)
 
 	def build_model(self):
@@ -237,7 +238,7 @@ class Player(NPC):
 	def choose_action(self, state):
 		if np.random.rand() <= self.epsilon:
 			return random.randrange(self.action_size)
-		act_values = self.model.predict(state)
+		act_values = self.model.predict(state/255)
 		return np.argmax(act_values[0])  # returns action
 
 	def replay(self, batch_size, t):
@@ -247,9 +248,9 @@ class Player(NPC):
 			if done:
 				target = reward
 			else:
-				target = reward + self.gamma * np.clip(np.amax(self.target_model.predict(next_state)[0]), -1, 1)
+				target = reward + self.gamma * np.clip(np.amax(self.target_model.predict(next_state/255)[0]), -1, 1)
 
-			target_f = self.model.predict(state)
+			target_f = self.model.predict(state/255)
 			target_f[0][action] = target
 			return target_f
 
@@ -257,11 +258,11 @@ class Player(NPC):
 
 		#  minibatch = self.memory
 		target_fs = list(map(get_target_f, minibatch))
-		self.qvalues_sample = np.round(target_fs, 2)
+		self.qvalues_sample = np.round(target_fs[0], 2)
 
 		#  zip together all states, actions, rewards, next_states, dones
 		states, actions, rewards, next_states, dones = map(list, list(zip(*minibatch)))
-		self.model.fit(np.concatenate(states, axis=0), np.concatenate(target_fs, axis=0), epochs=1, verbose=False, batch_size=32)
+		self.model.fit(np.concatenate(states)/255, np.concatenate(target_fs), epochs=1, verbose=False, batch_size=batch_size)
 		if self.epsilon > self.epsilon_min:
 			self.epsilon *= self.epsilon_decay
 
@@ -500,15 +501,16 @@ class Fishbowl(QWidget):
 		# get first frames into memory
 		for _ in range(self.player.wlen):
 			self.animation_emitter.emit("act")
-			for _ in range(3):
+			for _ in range(self.player.frame_skip - 1):
 				self.animation_emitter.emit("repeat_action")
 
 		while True:
 			self.animation_emitter.emit("act")
 			# time.sleep(0.02)
-			for _ in range(3):
+			for _ in range(self.player.frame_skip - 1):
 				self.animation_emitter.emit("repeat_action")
-				time.sleep(0.0001)
+				# time.sleep(0.00005)
+			time.sleep(0.00001)
 			self.animation_emitter.emit("learn")
 
 	def restart_game(self):

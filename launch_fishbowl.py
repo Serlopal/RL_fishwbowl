@@ -12,13 +12,8 @@ from keras.optimizers import *
 from keras.models import load_model
 import random
 import os
-from cv2 import resize, INTER_CUBIC, imwrite, INTER_NEAREST
-
-import copy
-import numpy as np
 import tensorflow as tf
 import pyqtgraph as pg
-import cv2
 
 
 class QSignalViewer(pg.PlotWidget):
@@ -220,6 +215,8 @@ class Player(NPC):
 			model.add(Dense(128, activation='relu'))
 			model.add(Dense(self.action_size, activation='linear'))
 			model.compile(loss=tf.losses.huber_loss, optimizer=RMSprop(lr=0.00025, rho=0.95, epsilon=0.01))
+			global graph
+			graph = tf.get_default_graph()
 			return model
 
 	def save_model(self):
@@ -231,33 +228,41 @@ class Player(NPC):
 	def choose_action(self, state):
 		if np.random.rand() <= self.epsilon:
 			return random.randrange(self.action_size)
-		act_values = self.model.predict(state)
+		with graph.as_default():
+			act_values = self.model.predict(state)
 		return np.argmax(act_values[0])  # returns action
 
 	def replay(self, batch_size, t):
+		with graph.as_default():
+			def get_target_f(sample):
+				state_pred, action, reward, next_state_pred, done = sample
+				if done:
+					target = reward
+				else:
+					target = reward + self.gamma * np.clip(np.amax(next_state_pred[0]), -1, 1)
 
-		def get_target_f(sample):
-			state, action, reward, next_state, done = sample
-			if done:
-				target = reward
-			else:
-				target = reward + self.gamma * np.clip(np.amax(self.target_model.predict(next_state)[0]), -1, 1)
+				target_f = state_pred
+				target_f[action] = target
+				return target_f
 
-			target_f = self.model.predict(state)
-			target_f[0][action] = target
-			return target_f
+			def states2targets(minibatch):
+				states, actions, rewards, next_states, dones = zip(*minibatch)
+				state_preds = self.model.predict(np.concatenate(states, axis=0))
+				next_state_preds = self.target_model.predict(np.concatenate(next_states, axis=0))
+				return list(zip(state_preds, actions, rewards, next_state_preds, dones))
 
-		minibatch = random.sample(self.memory, batch_size)
+			minibatch = random.sample(self.memory, batch_size)
+			# to speed up performance, do predictions for state and next state first
+			minibatch_with_preds = states2targets(minibatch)
+			target_fs = list(map(get_target_f, minibatch_with_preds))
 
-		#  minibatch = self.memory
-		target_fs = list(map(get_target_f, minibatch))
-		self.qvalues_sample = np.round(target_fs[0], 2)
+			self.qvalues_sample = np.round(target_fs[0], 2)
 
-		#  zip together all states, actions, rewards, next_states, dones
-		states, actions, rewards, next_states, dones = map(list, list(zip(*minibatch)))
-		self.model.fit(np.concatenate(states), np.concatenate(target_fs), epochs=1, verbose=False, batch_size=batch_size)
-		if self.epsilon > self.epsilon_min:
-			self.epsilon *= self.epsilon_decay
+			#  zip together all states, actions, rewards, next_states, dones
+			states, actions, rewards, next_states, dones = map(list, list(zip(*minibatch)))
+			self.model.fit(np.concatenate(states), np.stack(target_fs, axis=0), epochs=1, verbose=False, batch_size=batch_size)
+			if self.epsilon > self.epsilon_min:
+				self.epsilon *= self.epsilon_decay
 
 	def revive(self):
 		super().revive()
@@ -328,6 +333,7 @@ class Fishbowl(QWidget):
 		self.n_games = 1
 		self.info_signal = info_signal
 		self.viewer_signal = viewer_signal
+		self.episode_time = time.time()
 
 		self.screen = QGuiApplication.primaryScreen()
 
@@ -421,7 +427,7 @@ class Fishbowl(QWidget):
 			self.episode_t += 1
 
 			# update target network if it is time to
-			if self.global_t % self.player.update_target_freq == 0:
+			if self.global_t % self.player.update_target_freq == 0 and len(self.player.memory) > self.player.observe_iterations:
 				print("updating target network")
 				self.player.update_target_model()
 
@@ -488,22 +494,14 @@ class Fishbowl(QWidget):
 
 	def _animate_balls(self):
 		time.sleep(2)
-		# get first frames into memory
-		for _ in range(self.player.wlen):
-			self.animation_emitter.emit("act")
-			for _ in range(self.player.frame_skip - 1):
-				self.animation_emitter.emit("repeat_action")
-
 		while True:
 			self.animation_emitter.emit("act")
 			# time.sleep(0.02)
 			for _ in range(self.player.frame_skip - 1):
 				self.animation_emitter.emit("repeat_action")
-				# time.sleep(0.01)
-			# time.sleep(0.03)
-			self.animation_emitter.emit("learn")
+				time.sleep(0.01)
 
-	def _animate_balls_noqt(self):
+	def animate_balls_noqt(self):
 		time.sleep(2)
 		for _ in range(self.player.wlen):
 			self.life_loop("act")
@@ -518,10 +516,14 @@ class Fishbowl(QWidget):
 
 	def restart_game(self):
 		self.n_games += 1
-		message = "Game {0} - Exploration Rate {1} - {2}".format(
-			self.n_games, np.round(self.player.epsilon, 5), "Training" if len(self.player.memory) > self.player.observe_iterations else "Memory size {}".format(len(self.player.memory)))
+		message = "Game {0} - Exploration Rate {1} - {2} - episode reward {3: < 6} - duration {4: < 6}".format(
+			self.n_games,
+			np.round(self.player.epsilon, 5),
+			"Training" if len(self.player.memory) > self.player.observe_iterations else "Memory size {}".format(len(self.player.memory)),
+			np.round(self.episode_reward, 4),
+			np.round(time.time() - self.episode_time, 4))
 		print(message)
-		self.info_signal.emit(message)
+		# self.info_signal.emit(message)
 		for enemy in self.enemies:
 			enemy.revive()
 		self.player.revive()
@@ -530,6 +532,8 @@ class Fishbowl(QWidget):
 		# emit and reset episode reward
 		self.episode_reward = 0.0
 		self.episode_t = 0
+		# set new episode start time
+		self.episode_time = time.time()
 
 
 class GameUI:
@@ -572,16 +576,15 @@ class GameUI:
 		starts the ball animation thread and launches the QT app
 		"""
 		self.start_animation()
-		self.app.exec()
+		# self.app.exec()
 
 	def start_animation(self):
 		"""
 		waits 1 second so that the QT app is running and then launches the ball animation thread
 		"""
-		self.fishbowl.animate_balls()
+		self.fishbowl.animate_balls_noqt()
 
 
 if __name__ == "__main__":
-
 	ui = GameUI()
 	ui.start_ui()

@@ -188,7 +188,6 @@ class Player(NPC):
 		if state is not None:
 			# choose an action
 			action = self.choose_action(state)
-
 			# update player coords
 			self.coords = self.spherical_clip(self.coords + self.allowed_dirs[action] * self.speed)
 
@@ -497,7 +496,6 @@ class Fishbowl(QWidget):
 
 	def _animate_balls(self):
 		time.sleep(2)
-
 		# get first frames into memory
 		for _ in range(self.player.wlen):
 			self.animation_emitter.emit("act")
@@ -509,8 +507,8 @@ class Fishbowl(QWidget):
 			# time.sleep(0.02)
 			for _ in range(self.player.frame_skip - 1):
 				self.animation_emitter.emit("repeat_action")
-				# time.sleep(0.00005)
-			time.sleep(0.00001)
+				time.sleep(0.01)
+			# time.sleep(0.03)
 			self.animation_emitter.emit("learn")
 
 	def restart_game(self):

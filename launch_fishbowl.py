@@ -176,7 +176,7 @@ class Player(NPC):
 
 		self.update_target_freq = 10000
 		self.save_model_step = 4000
-		self.observe_iterations = 20000
+		self.observe_iterations = 200
 
 		self.wlen = 4
 		self.frame_memory = deque(maxlen=self.wlen)
@@ -241,27 +241,31 @@ class Player(NPC):
 		return np.argmax(act_values[0])  # returns action
 
 	def replay(self, batch_size, t):
-
 		def get_target_f(sample):
-			state, action, reward, next_state, done = sample
+			state_pred, action, reward, next_state_pred, done = sample
 			if done:
 				target = reward
 			else:
-				target = reward + self.gamma * np.clip(np.amax(self.target_model.predict(next_state/255)[0]), -1, 1)
+				target = reward + self.gamma * np.clip(np.amax(next_state_pred[0]), -1, 1)
 
-			target_f = self.model.predict(state/255)
-			target_f[0][action] = target
+			target_f = state_pred
+			target_f[action] = target
 			return target_f
 
-		minibatch = random.sample(self.memory, batch_size)
+		def states2targets(minibatch):
+			states, actions, rewards, next_states, dones = zip(*minibatch)
+			state_preds = self.model.predict(np.concatenate(states, axis=0)/255)
+			next_state_preds = self.target_model.predict(np.concatenate(next_states, axis=0)/255)
+			return list(zip(state_preds, actions, rewards, next_state_preds, dones))
 
-		#  minibatch = self.memory
-		target_fs = list(map(get_target_f, minibatch))
-		self.qvalues_sample = np.round(target_fs[0], 2)
+		minibatch = random.sample(self.memory, batch_size)
+		# to speed up performance, do predictions for state and next state first
+		minibatch_with_preds = states2targets(minibatch)
+		target_fs = list(map(get_target_f, minibatch_with_preds))
 
 		#  zip together all states, actions, rewards, next_states, dones
 		states, actions, rewards, next_states, dones = map(list, list(zip(*minibatch)))
-		self.model.fit(np.concatenate(states)/255, np.concatenate(target_fs), epochs=1, verbose=False, batch_size=batch_size)
+		self.model.fit(np.concatenate(states)/255, np.stack(target_fs, axis=0), epochs=1, verbose=False, batch_size=batch_size)
 		if self.epsilon > self.epsilon_min:
 			self.epsilon *= self.epsilon_decay
 

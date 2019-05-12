@@ -164,14 +164,14 @@ class Player(NPC):
 		self.gamma = 0.99  # discount rate
 		self.epsilon = 1.0  # 1.0  # exploration rate
 		self.epsilon_min = 0.1
-		self.epsilon_decay = 0.99998
+		self.epsilon_decay = 0.9999885
 		self.curr_state = None
-		self.curr_action = 8
+		self.curr_action = 7
 		self.speed = 0.05
 
 		self.update_target_freq = 10000
 		self.save_model_step = 4000
-		self.observe_iterations = 20000
+		self.observe_iterations = 50000
 
 		self.qvalue_example = 0.0
 		self.wlen = 4
@@ -295,11 +295,12 @@ class Player(NPC):
 class Fishbowl(QWidget):
 	animation_emitter = pyqtSignal(object)
 
-	def __init__(self, info_signal, viewer_signal):
+	def __init__(self, info_signal, viewer_signal, mode):
 		super().__init__()
 
 		# connect signal from emitter to trigger the animation
-		self.animation_emitter.connect(lambda x: self.life_loop_train(x))
+		self.life_loop = self.life_loop_train if mode == "train" else self.life_loop_test
+		self.animation_emitter.connect(lambda x: self.life_loop(x))
 
 		self.fishbowl_color = QColor(128, 128, 128)
 		self.fishbowl_radius = 1.0
@@ -589,7 +590,8 @@ class Fishbowl(QWidget):
 
 class GameUI:
 
-	def __init__(self, UI_name="fishbowl"):
+	def __init__(self, mode=None, UI_name="fishbowl"):
+		self.mode = mode
 		self.app = QApplication([UI_name])
 		self.app.setObjectName(UI_name)
 		self.UI_name = UI_name
@@ -610,7 +612,7 @@ class GameUI:
 		self.layout = QGridLayout()
 		self.n_games_label = DynamicLabel("Game ")
 		self.signal_viewer = QSignalViewer(1)
-		self.fishbowl = Fishbowl(self.n_games_label.signal, self.signal_viewer.emitter)
+		self.fishbowl = Fishbowl(self.n_games_label.signal, self.signal_viewer.emitter, self.mode)
 
 		self.layout.addWidget(self.n_games_label, 0, 0, 1, 10)
 		self.layout.addWidget(self.fishbowl, 1, 0, 10, 10)
@@ -620,7 +622,8 @@ class GameUI:
 
 		# set layout inside window
 		self.window.setLayout(self.layout)
-		self.window.show()
+		if self.mode == "test":
+			self.window.show()
 
 	def start_ui(self):
 		"""
@@ -633,9 +636,14 @@ class GameUI:
 		"""
 		waits 1 second so that the QT app is running and then launches the ball animation thread
 		"""
-		self.fishbowl.animate_balls()
+		if self.mode == "train":
+			self.fishbowl.animate_balls_noqt()
+		else:
+			self.fishbowl.animate_balls()
 
 
 if __name__ == "__main__":
-	ui = GameUI()
+	mode = "train"
+	assert mode == "train" or mode == "test"
+	ui = GameUI(mode)
 	ui.start_ui()

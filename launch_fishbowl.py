@@ -171,7 +171,7 @@ class Player(NPC):
 
 		self.update_target_freq = 10000
 		self.save_model_step = 4000
-		self.observe_iterations = 50000
+		self.observe_iterations = 500
 
 		self.qvalue_example = 0.0
 		self.wlen = 4
@@ -204,6 +204,8 @@ class Player(NPC):
 			self.save_to_memory(state, action, reward, next_state, terminal_flag)
 
 	def build_model(self):
+		global graph
+		graph = tf.get_default_graph()
 		if os.path.exists("model.h5"):
 			print("found previous model	")
 			model = load_model(self.model_name, custom_objects={'huber_loss': tf.losses.huber_loss})
@@ -218,8 +220,6 @@ class Player(NPC):
 			# opt = RMSprop(lr=0.025, rho=0.95, epsilon=0.01)
 			opt = Adam()
 			model.compile(loss=tf.losses.huber_loss, optimizer=opt)
-			global graph
-			graph = tf.get_default_graph()
 			return model
 
 	def save_model(self):

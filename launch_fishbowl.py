@@ -160,11 +160,11 @@ class Player(NPC):
 		# ----------------------------
 		self.state_size = state_size
 		self.action_size = 8
-		self.memory = deque(maxlen=200000)
+		self.memory = deque(maxlen=1000000)
 		self.gamma = 0.99  # discount rate
 		self.epsilon = 1.0  # 1.0  # exploration rate
 		self.epsilon_min = 0.1
-		self.epsilon_decay = 0.9999
+		self.epsilon_decay = 0.99998
 		self.curr_state = None
 		self.curr_action = 8
 		self.speed = 0.05
@@ -173,6 +173,7 @@ class Player(NPC):
 		self.save_model_step = 4000
 		self.observe_iterations = 20000
 
+		self.qvalue_example = 0.0
 		self.wlen = 4
 		self.state_memory = deque(maxlen=self.wlen)
 		self.model_name = "model.h5"
@@ -210,11 +211,13 @@ class Player(NPC):
 		else:
 			# Neural Net for Deep-Q learning Model
 			model = Sequential()
-			model.add(GRU(256, input_shape=(self.wlen, self.state_size), return_sequences=False))
-			model.add(Dense(256, activation='relu'))
-			model.add(Dense(128, activation='relu'))
+			model.add(GRU(128, input_shape=(self.wlen, self.state_size), return_sequences=False))
+			model.add(Dense(64, activation='relu'))
+			model.add(Dense(32, activation='relu'))
 			model.add(Dense(self.action_size, activation='linear'))
-			model.compile(loss=tf.losses.huber_loss, optimizer=RMSprop(lr=0.00025, rho=0.95, epsilon=0.01))
+			# opt = RMSprop(lr=0.025, rho=0.95, epsilon=0.01)
+			opt = Adam()
+			model.compile(loss=tf.losses.huber_loss, optimizer=opt)
 			global graph
 			graph = tf.get_default_graph()
 			return model
@@ -230,6 +233,7 @@ class Player(NPC):
 			return random.randrange(self.action_size)
 		with graph.as_default():
 			act_values = self.model.predict(state)
+			self.qvalue_example = act_values
 		return np.argmax(act_values[0])  # returns action
 
 	def replay(self, batch_size, t):
@@ -255,8 +259,6 @@ class Player(NPC):
 			# to speed up performance, do predictions for state and next state first
 			minibatch_with_preds = states2targets(minibatch)
 			target_fs = list(map(get_target_f, minibatch_with_preds))
-
-			self.qvalues_sample = np.round(target_fs[0], 2)
 
 			#  zip together all states, actions, rewards, next_states, dones
 			states, actions, rewards, next_states, dones = map(list, list(zip(*minibatch)))
@@ -297,7 +299,7 @@ class Fishbowl(QWidget):
 		super().__init__()
 
 		# connect signal from emitter to trigger the animation
-		self.animation_emitter.connect(lambda x: self.life_loop(x))
+		self.animation_emitter.connect(lambda x: self.life_loop_train(x))
 
 		self.fishbowl_color = QColor(128, 128, 128)
 		self.fishbowl_radius = 1.0
@@ -326,7 +328,6 @@ class Fishbowl(QWidget):
 
 		self.episode_reward = 0
 		self.reward_memory = deque(maxlen=100)
-		self.max_episode_len = 400
 		self.episode_t = 0
 		self.global_t = 0
 
@@ -341,7 +342,7 @@ class Fishbowl(QWidget):
 		new_max = self.fishbowl_pixel_radius
 		return ((p / self.fishbowl_radius) * new_max for p in point)
 
-	def life_loop(self, command):
+	def life_loop_train(self, command):
 		"""
 		:param command: unused
 		this method imlements the main loop of the fishbowl
@@ -392,12 +393,6 @@ class Fishbowl(QWidget):
 			self.repaint()
 
 		elif command == "learn":
-
-			# if episode has taken too much time, end it
-			if self.episode_t > self.max_episode_len:
-				self.restart_game()
-				return
-
 			# observe state after movement
 			frame = self.player.process_state(self.get_state())
 
@@ -436,10 +431,63 @@ class Fishbowl(QWidget):
 				if len(self.player.memory) > self.player.observe_iterations:
 					self.player.replay(batch_size=32, t=self.global_t)
 					if self.n_games % self.player.save_model_step == 0:
-						print(self.player.qvalues_sample)
 						self.player.save_model()
 				self.restart_game()
 				return
+
+	def life_loop_test(self, command):
+		"""
+		:param command: unused
+		this method imlements the main loop of the fishbowl
+		in which we move around players, check who is dead and so on
+		"""
+
+		if command == "act":
+			frame = self.player.process_state(self.get_state())
+			self.player.state_memory.append(frame)
+
+			# build current state
+			state = self.player.build_state()
+
+			# issue player action
+			action = self.player.act(state)
+
+			# issue enemies reaction
+			for enemy in self.enemies:
+				enemy.move()
+
+			# render new frame state
+			self.repaint()
+
+		elif command == "repeat_action":
+			# check game has finished
+			terminal_flag = self.player.check_killed(enemies=self.enemies)
+			if terminal_flag:
+				return
+
+			# issue same action as before
+			self.player.act(repeat_action=True)
+
+			# issue enemies reaction
+			for enemy in self.enemies:
+				enemy.move()
+
+			# render new frame state
+			self.repaint()
+
+		elif command == "check_terminal":
+			# observe state after movement
+			frame = self.player.process_state(self.get_state())
+
+			# update memory stack with new frame
+			self.player.state_memory.append(frame)
+
+			# check if the state is terminal
+			terminal_flag = self.player.check_killed(enemies=self.enemies)
+
+			# check game is over. If so, train the model if our memory is populated
+			if terminal_flag:
+				self.restart_game()
 
 	def get_state(self):
 		return np.vstack([x.coords for x in self.enemies] + [self.player.coords])
@@ -488,7 +536,7 @@ class Fishbowl(QWidget):
 		qp.drawEllipse(c + QPoint(*self.scale_point(np.squeeze(self.player.coords))), *([self.player_pixel_radius] * 2))
 
 	def animate_balls(self):
-		self.update_thread = threading.Thread(target=self._animate_balls_noqt)
+		self.update_thread = threading.Thread(target=self._animate_balls)
 		self.update_thread.daemon = True
 		self.update_thread.start()
 
@@ -496,32 +544,35 @@ class Fishbowl(QWidget):
 		time.sleep(2)
 		while True:
 			self.animation_emitter.emit("act")
-			# time.sleep(0.02)
+			time.sleep(0.03)
 			for _ in range(self.player.frame_skip - 1):
 				self.animation_emitter.emit("repeat_action")
-				time.sleep(0.01)
+				time.sleep(0.03)
+			self.animation_emitter.emit("check_terminal")
 
 	def animate_balls_noqt(self):
 		time.sleep(2)
 		for _ in range(self.player.wlen):
-			self.life_loop("act")
+			self.life_loop_train("act")
 			for _ in range(self.player.frame_skip - 1):
-				self.life_loop("repeat_action")
+				self.life_loop_train("repeat_action")
 
 			while True:
-				self.life_loop("act")
+				self.life_loop_train("act")
 				for _ in range(self.player.frame_skip - 1):
-					self.life_loop("repeat_action")
-				self.life_loop("learn")
+					self.life_loop_train("repeat_action")
+				self.life_loop_train("learn")
 
 	def restart_game(self):
 		self.n_games += 1
-		message = "Game {0} - Exploration Rate {1} - {2} - episode reward {3: < 6} - duration {4: < 6}".format(
+		message = "Game {0} - Exploration Rate {1} - {2} - episode reward {3: < 6} - duration {4: < 6} - last qvalues {5}".format(
 			self.n_games,
 			np.round(self.player.epsilon, 5),
 			"Training" if len(self.player.memory) > self.player.observe_iterations else "Memory size {}".format(len(self.player.memory)),
 			np.round(self.episode_reward, 4),
-			np.round(time.time() - self.episode_time, 4))
+			np.round(time.time() - self.episode_time, 4),
+			np.round(self.player.qvalue_example, 2)
+		)
 		print(message)
 		# self.info_signal.emit(message)
 		for enemy in self.enemies:
@@ -569,20 +620,20 @@ class GameUI:
 
 		# set layout inside window
 		self.window.setLayout(self.layout)
-		# self.window.show()
+		self.window.show()
 
 	def start_ui(self):
 		"""
 		starts the ball animation thread and launches the QT app
 		"""
 		self.start_animation()
-		# self.app.exec()
+		self.app.exec()
 
 	def start_animation(self):
 		"""
 		waits 1 second so that the QT app is running and then launches the ball animation thread
 		"""
-		self.fishbowl.animate_balls_noqt()
+		self.fishbowl.animate_balls()
 
 
 if __name__ == "__main__":

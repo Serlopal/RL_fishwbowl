@@ -176,7 +176,7 @@ class Player(NPC):
 
 		self.update_target_freq = 10000
 		self.save_model_step = 4000
-		self.observe_iterations = 200
+		self.observe_iterations = 20000
 
 		self.wlen = 4
 		self.frame_memory = deque(maxlen=self.wlen)
@@ -511,7 +511,7 @@ class Fishbowl(QWidget):
 			# time.sleep(0.02)
 			for _ in range(self.player.frame_skip - 1):
 				self.animation_emitter.emit("repeat_action")
-				time.sleep(0.01)
+				time.sleep(0.001)
 			# time.sleep(0.03)
 			self.animation_emitter.emit("learn")
 

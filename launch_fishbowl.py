@@ -146,7 +146,7 @@ class Player(NPC):
 	https://keon.io/deep-q-learning/
 	"""
 
-	def __init__(self, pixel_radius, fishbowl_pixel_radius, fishbowl_radius, state_size):
+	def __init__(self, pixel_radius, fishbowl_pixel_radius, fishbowl_radius, state_size, train):
 		super().__init__(pixel_radius, fishbowl_pixel_radius, fishbowl_radius)
 		# self.allowed_dirs.append(np.array([0, 0]))
 
@@ -157,12 +157,14 @@ class Player(NPC):
 		self.frame_size = 84
 		self.frame_skip = 4
 
+		self.train = train
+
 		# ----------------------------
 		self.state_size = state_size
 		self.action_size = 8
 		self.memory = deque(maxlen=1000000)
 		self.gamma = 0.99  # discount rate
-		self.epsilon = 1.0  # 1.0  # exploration rate
+		self.epsilon = 1.0 if self.train else 0.0  # 1.0  # exploration rate
 		self.epsilon_min = 0.1
 		self.epsilon_decay = 0.9999885
 		self.curr_state = None
@@ -171,7 +173,7 @@ class Player(NPC):
 
 		self.update_target_freq = 10000
 		self.save_model_step = 4000
-		self.observe_iterations = 500
+		self.observe_iterations = 50000
 
 		self.qvalue_example = 0.0
 		self.wlen = 4
@@ -199,9 +201,7 @@ class Player(NPC):
 
 	def remember(self, state, action, reward, next_state, terminal_flag):
 		# increase the probability of terminal states being used for training
-		n = 4 if reward < 0 else 1
-		for _ in range(n):
-			self.save_to_memory(state, action, reward, next_state, terminal_flag)
+		self.save_to_memory(state, action, reward, next_state, terminal_flag)
 
 	def build_model(self):
 		global graph
@@ -213,12 +213,12 @@ class Player(NPC):
 		else:
 			# Neural Net for Deep-Q learning Model
 			model = Sequential()
-			model.add(GRU(128, input_shape=(self.wlen, self.state_size), return_sequences=False))
-			model.add(Dense(64, activation='relu'))
-			model.add(Dense(32, activation='relu'))
+			model.add(GRU(256, input_shape=(self.wlen, self.state_size), return_sequences=False))
+			model.add(Dense(128, activation='relu'))
+			model.add(Dense(128, activation='relu'))
 			model.add(Dense(self.action_size, activation='linear'))
-			# opt = RMSprop(lr=0.025, rho=0.95, epsilon=0.01)
-			opt = Adam()
+			opt = RMSprop(lr=0.025, rho=0.95, epsilon=0.01)
+			# opt = Adam()
 			model.compile(loss=tf.losses.huber_loss, optimizer=opt)
 			return model
 
@@ -295,13 +295,13 @@ class Player(NPC):
 class Fishbowl(QWidget):
 	animation_emitter = pyqtSignal(object)
 
-	def __init__(self, info_signal, viewer_signal, mode):
+	def __init__(self, info_signal, viewer_signal, train):
 		super().__init__()
 
 		# connect signal from emitter to trigger the animation
-		self.life_loop = self.life_loop_train if mode == "train" else self.life_loop_test
 		self.animation_emitter.connect(lambda x: self.life_loop(x))
 
+		self.train = train
 		self.fishbowl_color = QColor(128, 128, 128)
 		self.fishbowl_radius = 1.0
 		self.fishbowl_pixel_radius = 100
@@ -325,7 +325,8 @@ class Fishbowl(QWidget):
 			self.npc_pixel_radius,
 			self.fishbowl_pixel_radius,
 			self.fishbowl_radius,
-			(self.nenemies + 1) * 2)
+			(self.nenemies + 1) * 2,
+			self.train)
 
 		self.episode_reward = 0
 		self.reward_memory = deque(maxlen=100)
@@ -343,7 +344,7 @@ class Fishbowl(QWidget):
 		new_max = self.fishbowl_pixel_radius
 		return ((p / self.fishbowl_radius) * new_max for p in point)
 
-	def life_loop_train(self, command):
+	def life_loop(self, command):
 		"""
 		:param command: unused
 		this method imlements the main loop of the fishbowl
@@ -351,24 +352,27 @@ class Fishbowl(QWidget):
 		"""
 
 		if command == "act":
-			frame = self.player.process_state(self.get_state())
-			self.player.state_memory.append(frame)
+			while True:
+				frame = self.player.process_state(self.get_state())
+				self.player.state_memory.append(frame)
+				if len(self.player.state_memory) >= self.player.wlen:
+					break
 
 			# build current state
 			state = self.player.build_state()
 
-			# store state before moving
-			self.player.curr_state = state
-
-			if len(self.player.memory) < self.player.observe_iterations:
+			if len(self.player.memory) < self.player.observe_iterations and self.train:
 				action = np.random.randint(low=0, high=self.player.action_size)
 				self.player.act(given_action=action)
 			else:
 				# issue player action
 				action = self.player.act(state)
 
-			# save chosen action
-			self.player.curr_action = action
+			if self.train:
+				# store state before moving
+				self.player.curr_state = state
+				# save chosen action
+				self.player.curr_action = action
 
 			# issue enemies reaction
 			for enemy in self.enemies:
@@ -407,88 +411,35 @@ class Fishbowl(QWidget):
 
 			# build reward depending on terminal flag
 			if terminal_flag:
-				reward = -1
+				reward = -1.0
 			else:
-				reward = +0.01
+				reward = 0.0
 
 			# add reward to episode sum for performance tracking
 			self.episode_reward += reward
 
-			# store movement experience to memory if the player has already seen enough frames in a row to build a state
-			if len(self.player.state_memory) >= self.player.wlen:
-				self.player.remember(self.player.curr_state, self.player.curr_action, reward, next_state, terminal_flag)
+			if self.train:
+				# store movement experience to memory if the player has already seen enough frames in a row to build a state
+				if len(self.player.state_memory) >= self.player.wlen:
+					self.player.remember(self.player.curr_state, self.player.curr_action, reward, next_state, terminal_flag)
 
-			# increase global and episodic counter
-			self.global_t += 1
-			self.episode_t += 1
+				# increase global and episodic counter
+				self.global_t += 1
+				self.episode_t += 1
 
-			# update target network if it is time to
-			if self.global_t % self.player.update_target_freq == 0 and len(self.player.memory) > self.player.observe_iterations:
-				print("updating target network")
-				self.player.update_target_model()
+				# update target network if it is time to
+				if self.global_t % self.player.update_target_freq == 0 and len(self.player.memory) > self.player.observe_iterations:
+					print("updating target network")
+					self.player.update_target_model()
 
 			# check game is over. If so, train the model if our memory is populated
 			if terminal_flag:
-				if len(self.player.memory) > self.player.observe_iterations:
+				if len(self.player.memory) > self.player.observe_iterations and self.train:
 					self.player.replay(batch_size=32, t=self.global_t)
 					if self.n_games % self.player.save_model_step == 0:
 						self.player.save_model()
-				self.restart_game()
+				self.restart_game(reward)
 				return
-
-	def life_loop_test(self, command):
-		"""
-		:param command: unused
-		this method imlements the main loop of the fishbowl
-		in which we move around players, check who is dead and so on
-		"""
-
-		if command == "act":
-			frame = self.player.process_state(self.get_state())
-			self.player.state_memory.append(frame)
-
-			# build current state
-			state = self.player.build_state()
-
-			# issue player action
-			action = self.player.act(state)
-
-			# issue enemies reaction
-			for enemy in self.enemies:
-				enemy.move()
-
-			# render new frame state
-			self.repaint()
-
-		elif command == "repeat_action":
-			# check game has finished
-			terminal_flag = self.player.check_killed(enemies=self.enemies)
-			if terminal_flag:
-				return
-
-			# issue same action as before
-			self.player.act(repeat_action=True)
-
-			# issue enemies reaction
-			for enemy in self.enemies:
-				enemy.move()
-
-			# render new frame state
-			self.repaint()
-
-		elif command == "check_terminal":
-			# observe state after movement
-			frame = self.player.process_state(self.get_state())
-
-			# update memory stack with new frame
-			self.player.state_memory.append(frame)
-
-			# check if the state is terminal
-			terminal_flag = self.player.check_killed(enemies=self.enemies)
-
-			# check game is over. If so, train the model if our memory is populated
-			if terminal_flag:
-				self.restart_game()
 
 	def get_state(self):
 		return np.vstack([x.coords for x in self.enemies] + [self.player.coords])
@@ -537,9 +488,9 @@ class Fishbowl(QWidget):
 		qp.drawEllipse(c + QPoint(*self.scale_point(np.squeeze(self.player.coords))), *([self.player_pixel_radius] * 2))
 
 	def animate_balls(self):
-		self.update_thread = threading.Thread(target=self._animate_balls)
-		self.update_thread.daemon = True
-		self.update_thread.start()
+		update_thread = threading.Thread(target=self._animate_balls)
+		update_thread.daemon = True
+		update_thread.start()
 
 	def _animate_balls(self):
 		time.sleep(2)
@@ -549,24 +500,19 @@ class Fishbowl(QWidget):
 			for _ in range(self.player.frame_skip - 1):
 				self.animation_emitter.emit("repeat_action")
 				time.sleep(0.03)
-			self.animation_emitter.emit("check_terminal")
+			self.animation_emitter.emit("learn")
 
 	def animate_balls_noqt(self):
 		time.sleep(2)
-		for _ in range(self.player.wlen):
-			self.life_loop_train("act")
+		while True:
+			self.life_loop("act")
 			for _ in range(self.player.frame_skip - 1):
-				self.life_loop_train("repeat_action")
+				self.life_loop("repeat_action")
+			self.life_loop("learn")
 
-			while True:
-				self.life_loop_train("act")
-				for _ in range(self.player.frame_skip - 1):
-					self.life_loop_train("repeat_action")
-				self.life_loop_train("learn")
-
-	def restart_game(self):
+	def restart_game(self, reward):
 		self.n_games += 1
-		message = "Game {0} - Exploration Rate {1} - {2} - episode reward {3: < 6} - duration {4: < 6} - last qvalues {5}".format(
+		message = "Game {0: >6} - Exploration Rate {1: >6} - {2} - episode reward {3: >6} - duration {4: >6} - last qvalues {5}".format(
 			self.n_games,
 			np.round(self.player.epsilon, 5),
 			"Training" if len(self.player.memory) > self.player.observe_iterations else "Memory size {}".format(len(self.player.memory)),
@@ -575,7 +521,8 @@ class Fishbowl(QWidget):
 			np.round(self.player.qvalue_example, 2)
 		)
 		print(message)
-		# self.info_signal.emit(message)
+		self.info_signal.emit(message)
+		self.viewer_signal.emit(self.episode_reward)
 		for enemy in self.enemies:
 			enemy.revive()
 		self.player.revive()
@@ -590,17 +537,17 @@ class Fishbowl(QWidget):
 
 class GameUI:
 
-	def __init__(self, mode=None, UI_name="fishbowl"):
-		self.mode = mode
-		self.app = QApplication([UI_name])
-		self.app.setObjectName(UI_name)
-		self.UI_name = UI_name
+	def __init__(self, train=None, ui_name="fishbowl"):
+		self.train = train
+		self.app = QApplication([ui_name])
+		self.app.setObjectName(ui_name)
+		self.UI_name = ui_name
 		# set app style
 		self.app.setStyle("Fusion")
 		# create main window
 		self.window = QMainWindow()
-		self.window.setWindowTitle(UI_name)
-		self.window.setObjectName(UI_name)
+		self.window.setWindowTitle(ui_name)
+		self.window.setObjectName(ui_name)
 		self.main_group = QGroupBox()
 		self.window.setCentralWidget(self.main_group)
 		# set window geometry
@@ -612,17 +559,18 @@ class GameUI:
 		self.layout = QGridLayout()
 		self.n_games_label = DynamicLabel("Game ")
 		self.signal_viewer = QSignalViewer(1)
-		self.fishbowl = Fishbowl(self.n_games_label.signal, self.signal_viewer.emitter, self.mode)
+		self.fishbowl = Fishbowl(self.n_games_label.signal, self.signal_viewer.emitter, self.train)
 
 		self.layout.addWidget(self.n_games_label, 0, 0, 1, 10)
-		self.layout.addWidget(self.fishbowl, 1, 0, 10, 10)
-		# self.layout.addWidget(self.signal_viewer, 1, 10, 10, 10)
+		if not self.train:
+			self.layout.addWidget(self.fishbowl, 1, 0, 10, 10)
+		self.layout.addWidget(self.signal_viewer, 1, 10, 10, 10)
 
 		self.main_group.setLayout(self.layout)
 
 		# set layout inside window
 		self.window.setLayout(self.layout)
-		if self.mode == "test":
+		if not self.train:
 			self.window.show()
 
 	def start_ui(self):
@@ -636,14 +584,13 @@ class GameUI:
 		"""
 		waits 1 second so that the QT app is running and then launches the ball animation thread
 		"""
-		if self.mode == "train":
+		if self.train:
 			self.fishbowl.animate_balls_noqt()
 		else:
 			self.fishbowl.animate_balls()
 
 
 if __name__ == "__main__":
-	mode = "train"
-	assert mode == "train" or mode == "test"
-	ui = GameUI(mode)
+	train = True
+	ui = GameUI(train)
 	ui.start_ui()

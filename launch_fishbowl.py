@@ -14,7 +14,7 @@ import random
 import os
 import tensorflow as tf
 import pyqtgraph as pg
-
+from keras.layers import LeakyReLU
 
 class QSignalViewer(pg.PlotWidget):
 	emitter = pyqtSignal(object)
@@ -81,11 +81,15 @@ class NPC():
 		self.dead = False
 
 	def move(self):
-		self.coords = self.spherical_clip(self.coords + self.v)
-		if not self.inside_sphere() or self.first:
+		self.coords += self.v
+		if not self.inside_sphere():
+			self.coords = self.spherical_clip(self.coords)
+			self.angle = (self.angle - 127) % 360
+			self.v = self.speed * np.reshape([np.cos(np.deg2rad(self.angle)), np.sin(np.deg2rad(self.angle))], (1, -1))
+		elif self.first:
 			self.first = False
-			angle = np.deg2rad(np.random.randint(low=0, high=361, size=1))
-			self.v = self.speed * np.reshape([np.cos(angle), np.sin(angle)], (1, -1))
+			self.angle = (np.random.randint(low=0, high=360, size=1))
+			self.v = self.speed * np.reshape([np.cos(np.deg2rad(self.angle)), np.sin(np.deg2rad(self.angle))], (1, -1))
 
 	def move_fixed_angle(self):
 		self.coords = self.spherical_clip(self.coords + self.v)
@@ -163,17 +167,17 @@ class Player(NPC):
 		self.state_size = state_size
 		self.action_size = 8
 		self.memory = deque(maxlen=1000000)
-		self.gamma = 0.99  # discount rate
-		self.epsilon = 1.0 if self.train else 0.0  # 1.0  # exploration rate
+		self.gamma = 0.95  # discount rate
+		self.epsilon = 0.26 if self.train else 0.0  # 1.0  # exploration rate
 		self.epsilon_min = 0.1
-		self.epsilon_decay = 0.9999885
+		self.epsilon_decay = 0.999998
 		self.curr_state = None
 		self.curr_action = 7
 		self.speed = 0.05
 
-		self.update_target_freq = 10000
-		self.save_model_step = 4000
-		self.observe_iterations = 50000
+		self.update_target_freq = 40000  # in iters
+		self.save_model_step = 4000  # in games
+		self.observe_iterations = 50000  # in iters
 
 		self.qvalue_example = 0.0
 		self.wlen = 4
@@ -213,9 +217,11 @@ class Player(NPC):
 		else:
 			# Neural Net for Deep-Q learning Model
 			model = Sequential()
-			model.add(GRU(256, input_shape=(self.wlen, self.state_size), return_sequences=False))
-			model.add(Dense(128, activation='relu'))
-			model.add(Dense(128, activation='relu'))
+			model.add(GRU(256, input_shape=(self.wlen, self.state_size), activation="relu", return_sequences=False))
+			model.add(Dense(128))#, activation="relu"))
+			model.add(LeakyReLU(alpha=0.3))
+			model.add(Dense(128))#, activation="relu"))
+			model.add(LeakyReLU(alpha=0.3))
 			model.add(Dense(self.action_size, activation='linear'))
 			opt = RMSprop(lr=0.025, rho=0.95, epsilon=0.01)
 			# opt = Adam()
@@ -431,6 +437,7 @@ class Fishbowl(QWidget):
 				if self.global_t % self.player.update_target_freq == 0 and len(self.player.memory) > self.player.observe_iterations:
 					print("updating target network")
 					self.player.update_target_model()
+					print(self.message)
 
 			# check game is over. If so, train the model if our memory is populated
 			if terminal_flag:
@@ -520,7 +527,7 @@ class Fishbowl(QWidget):
 			np.round(time.time() - self.episode_time, 4),
 			np.round(self.player.qvalue_example, 2)
 		)
-		print(message)
+		self.message = message
 		self.info_signal.emit(message)
 		self.viewer_signal.emit(self.episode_reward)
 		for enemy in self.enemies:
@@ -564,7 +571,7 @@ class GameUI:
 		self.layout.addWidget(self.n_games_label, 0, 0, 1, 10)
 		if not self.train:
 			self.layout.addWidget(self.fishbowl, 1, 0, 10, 10)
-		self.layout.addWidget(self.signal_viewer, 1, 10, 10, 10)
+		# self.layout.addWidget(self.signal_viewer, 1, 10, 10, 10)
 
 		self.main_group.setLayout(self.layout)
 
@@ -591,6 +598,6 @@ class GameUI:
 
 
 if __name__ == "__main__":
-	train = True
+	train = False
 	ui = GameUI(train)
 	ui.start_ui()

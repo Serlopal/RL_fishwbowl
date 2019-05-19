@@ -79,6 +79,7 @@ class NPC():
 		self.pvdi = np.array([0, 0])
 		self.first = True
 		self.dead = False
+		self.angle = 0.0
 
 	def move(self):
 		self.coords += self.v
@@ -168,7 +169,7 @@ class Player(NPC):
 		self.action_size = 8
 		self.memory = deque(maxlen=1000000)
 		self.gamma = 0.95  # discount rate
-		self.epsilon = 0.26 if self.train else 0.0  # 1.0  # exploration rate
+		self.epsilon = 1.0 if self.train else 0.0  # 1.0  # exploration rate
 		self.epsilon_min = 0.1
 		self.epsilon_decay = 0.999998
 		self.curr_state = None
@@ -177,7 +178,7 @@ class Player(NPC):
 
 		self.update_target_freq = 40000  # in iters
 		self.save_model_step = 4000  # in games
-		self.observe_iterations = 50000  # in iters
+		self.observe_iterations = 5000  # in iters
 
 		self.qvalue_example = 0.0
 		self.wlen = 4
@@ -358,15 +359,15 @@ class Fishbowl(QWidget):
 		"""
 
 		if command == "act":
-			while True:
+			# this fills ups the state memory of the player the first time, then never again is used
+			while len(self.player.state_memory) < self.player.wlen:
 				frame = self.player.process_state(self.get_state())
 				self.player.state_memory.append(frame)
-				if len(self.player.state_memory) >= self.player.wlen:
-					break
 
-			# build current state
+			# build current state AGAIN, this is next_state from past iteration
 			state = self.player.build_state()
 
+			# decide if to act using model/epsilon_random or if to just go random until we reach the observe iterations
 			if len(self.player.memory) < self.player.observe_iterations and self.train:
 				action = np.random.randint(low=0, high=self.player.action_size)
 				self.player.act(given_action=action)
@@ -374,6 +375,7 @@ class Fishbowl(QWidget):
 				# issue player action
 				action = self.player.act(state)
 
+			# if we are training only, store current state and chosen action for later remember
 			if self.train:
 				# store state before moving
 				self.player.curr_state = state
@@ -384,7 +386,7 @@ class Fishbowl(QWidget):
 			for enemy in self.enemies:
 				enemy.move()
 
-			# render new frame state
+			# render new frame for qt
 			self.repaint()
 
 		elif command == "repeat_action":
@@ -406,8 +408,7 @@ class Fishbowl(QWidget):
 		elif command == "learn":
 			# observe state after movement
 			frame = self.player.process_state(self.get_state())
-
-			# update memory stack with new frame
+			# update memory stack with new frame ----> state = next_state
 			self.player.state_memory.append(frame)
 			# build next state
 			next_state = self.player.build_state()
@@ -598,6 +599,6 @@ class GameUI:
 
 
 if __name__ == "__main__":
-	train = False
+	train = True
 	ui = GameUI(train)
 	ui.start_ui()

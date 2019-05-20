@@ -316,7 +316,7 @@ class Fishbowl(QWidget):
 		self.wheel_width = self.fishbowl_pixel_radius * 0.15
 
 		self.npc_pixel_radius = self.fishbowl_pixel_radius * 0.05
-		self.player_pixel_radius = self.fishbowl_pixel_radius * 0.075
+		self.player_pixel_radius = self.fishbowl_pixel_radius * 0.05
 
 		self.fishbowl_border_size = self.fishbowl_pixel_radius * 0.004
 		self.fishbowl_thin_border_size = self.fishbowl_pixel_radius * 0.002
